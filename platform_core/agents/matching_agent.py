@@ -1,13 +1,14 @@
 """
-Agent 4: SIH Matching Agent with Explicit Intent Alignment Guard.
-Performs staged semantic retrieval via pgvector, explicit intent/domain alignment veto,
-and 6-factor multi-dimensional scoring against the structured Capability Manifest.
+Agent 4: SIH Matching Agent with Explicit Intent Alignment Guard & Full-Corpus Triage.
+Performs full-corpus parallel Groq triage unioned with pgvector semantic retrieval,
+explicit intent/domain alignment veto, and 6-factor multi-dimensional scoring against the structured Capability Manifest.
 """
 
 import json
 import logging
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Set, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -236,6 +237,170 @@ Respond ONLY with a valid JSON object:
             "reasoning": f"Cross-domain functional compatibility observed with '{ps_theme}' ({generic_score:.1f}% aim alignment)."
         }
 
+    def _groq_full_corpus_triage(
+        self,
+        db: Session,
+        repo_profile: Dict[str, Any],
+        manifest: Dict[str, Any]
+    ) -> List[str]:
+        """
+        Executes parallel full-corpus triage across all problem statements in batches of 15-20.
+        Uses Groq LLM (or Heuristic provider if offline) to shortlist problem statement IDs
+        that are plausibly related in real-world purpose to the project's Capability Manifest.
+        """
+        try:
+            all_ps = db.query(
+                ProblemStatement.id,
+                ProblemStatement.title,
+                ProblemStatement.theme,
+                ProblemStatement.expected_solution,
+                ProblemStatement.description
+            ).all()
+        except Exception as e:
+            logger.warning(f"Failed to query full problem statement corpus for triage: {e}")
+            return []
+
+        if not all_ps:
+            return []
+
+        # If provider is purely heuristic, use domain signal filtering directly
+        if not self.ai_provider or isinstance(self.ai_provider, HeuristicAIProvider):
+            target_domains = [d.lower() for d in repo_profile.get("target_domains", [])]
+            domain_signals = [s.lower() for s in (manifest.get("domain_signals") or repo_profile.get("domain_signals") or [])]
+            
+            shortlisted = []
+            for ps in all_ps:
+                t_lower = (ps.theme or "").lower()
+                title_lower = (ps.title or "").lower()
+                desc_lower = (ps.description or "").lower()
+                sol_lower = (ps.expected_solution or "").lower()
+                all_text = f"{t_lower} {title_lower} {desc_lower} {sol_lower}"
+                
+                # Check domain match
+                if any(d in t_lower or t_lower in d for d in target_domains if d):
+                    shortlisted.append(ps.id)
+                elif any(s in all_text for s in domain_signals if s):
+                    shortlisted.append(ps.id)
+            return shortlisted
+
+        # Build compact items for batching
+        items = []
+        for ps in all_ps:
+            summary = (ps.expected_solution or ps.description or "")[:120].strip().replace("\n", " ")
+            items.append({
+                "id": ps.id,
+                "title": ps.title[:90] if ps.title else "",
+                "theme": ps.theme or "",
+                "summary": summary
+            })
+
+        batch_size = 18
+        batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+        
+        repo_summary = repo_profile.get("project_summary") or repo_profile.get("description") or "Software Project"
+        repo_caps = ", ".join([c["name"] for c in manifest.get("capabilities", [])[:4]]) or "Application capabilities"
+        repo_domains = ", ".join(repo_profile.get("target_domains", []))
+
+        system_prompt = (
+            "You are an expert AI triage architect for Smart India Hackathon. "
+            "Your task is to select problem statement IDs that plausibly share the real-world domain, "
+            "purpose, or problem-scope with the repository. Be broad and inclusive during triage; "
+            "do not discard possible domain matches. Return only valid JSON with 'shortlisted_ids'."
+        )
+
+        def process_batch(batch_items: List[Dict[str, Any]]) -> List[str]:
+            prompt = f"""REPOSITORY CONTEXT:
+- Name: {repo_profile.get('repo_name', 'Repo')}
+- Stated Purpose: {repo_summary}
+- Target Domains: {repo_domains}
+- Verified Capabilities: {repo_caps}
+
+CANDIDATE PROBLEM STATEMENTS TO TRIAGE:
+{json.dumps(batch_items, indent=2)}
+
+TASK:
+Review the candidates above. Return all candidate IDs that plausibly match or could be solved by transforming this project.
+Respond ONLY with a valid JSON object:
+{{
+  "shortlisted_ids": ["ID1", "ID2"]
+}}"""
+            try:
+                res = self.ai_provider.generate_json(prompt, system_prompt=system_prompt)
+                if isinstance(res, dict) and "shortlisted_ids" in res:
+                    valid_ids = {b["id"] for b in batch_items}
+                    return [str(x) for x in res["shortlisted_ids"] if str(x) in valid_ids]
+            except Exception as e:
+                logger.warning(f"Groq triage batch failed: {e}")
+            return []
+
+        shortlisted_ids = set()
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_batch = {executor.submit(process_batch, b): b for b in batches}
+            for future in as_completed(future_to_batch):
+                try:
+                    b_ids = future.result()
+                    shortlisted_ids.update(b_ids)
+                except Exception as e:
+                    logger.warning(f"Error gathering triage batch results: {e}")
+
+        logger.info(f"Full-corpus Groq triage shortlisted {len(shortlisted_ids)} candidates from {len(all_ps)} total problem statements.")
+        return list(shortlisted_ids)
+
+    def _retrieve_candidates(
+        self,
+        db: Session,
+        repo_vec: List[float],
+        analysis_data: Dict[str, Any],
+        repo_profile: Dict[str, Any],
+        manifest: Dict[str, Any]
+    ) -> List[ProblemStatement]:
+        """
+        Retrieves candidate problem statements using an additive union of:
+        1. Full-corpus parallel Groq triage pass (high recall across all ~226 PS).
+        2. pgvector cosine distance top-25 search (semantic embedding retrieval).
+        Logs candidate set sizes and overlap telemetry for observability.
+        """
+        # 1. Full-Corpus Groq Triage Pass
+        groq_candidate_ids = set(self._groq_full_corpus_triage(db, repo_profile, manifest))
+
+        # 2. Vector Cosine Search (pgvector)
+        vec_candidate_ids = set()
+        try:
+            vec_str = "[" + ",".join(f"{x:.6f}" for x in repo_vec) + "]"
+            sql = text("SELECT id FROM problem_statements ORDER BY embedding <=> (:vec)::vector LIMIT 25;")
+            result = db.execute(sql, {"vec": vec_str}).fetchall()
+            vec_candidate_ids = {r[0] for r in result}
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}. Falling back to domain query.")
+
+        # Also include domain themes as safety supplement
+        domains = analysis_data.get("target_domains", [])
+        if domains:
+            try:
+                domain_conds = " OR ".join([f"theme ILIKE :d{i}" for i in range(len(domains))])
+                params = {f"d{i}": f"%{d.split('/')[0].strip()}%" for i, d in enumerate(domains)}
+                domain_sql = text(f"SELECT id FROM problem_statements WHERE {domain_conds} LIMIT 15;")
+                d_result = db.execute(domain_sql, params).fetchall()
+                for r in d_result:
+                    vec_candidate_ids.add(r[0])
+            except Exception as e:
+                logger.warning(f"Domain search failed: {e}")
+
+        # 3. Additive Union of Groq Triage and Vector Search
+        union_ids = groq_candidate_ids.union(vec_candidate_ids)
+        overlap_ids = groq_candidate_ids.intersection(vec_candidate_ids)
+
+        logger.info(
+            f"[Candidate Retrieval Telemetry] Total Union: {len(union_ids)} candidates | "
+            f"Groq Triage: {len(groq_candidate_ids)} | Vector Search: {len(vec_candidate_ids)} | "
+            f"Overlap: {len(overlap_ids)} candidates."
+        )
+
+        if union_ids:
+            return db.query(ProblemStatement).filter(ProblemStatement.id.in_(list(union_ids))).all()
+
+        return db.query(ProblemStatement).limit(35).all()
+
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
         db: Session = context["db"]
         analysis_data = context.get("analysis_data", {})
@@ -281,8 +446,8 @@ Respond ONLY with a valid JSON object:
         repo_vec = self.embedder.get_embedding(project_rep)
         embedding_fallback_active = self.embedder.is_fallback_active
 
-        # Retrieve candidate problem statements from PostgreSQL
-        candidates = self._retrieve_candidates(db, repo_vec, analysis_data)
+        # Retrieve candidate problem statements from PostgreSQL via full-corpus Groq triage + vector union
+        candidates = self._retrieve_candidates(db, repo_vec, analysis_data, repo_profile, manifest)
 
         scored_matches = []
         vetoed_matches = []
@@ -350,36 +515,6 @@ Respond ONLY with a valid JSON object:
             "alternative_candidates": alternative_candidates,
             "summary_output": summary
         }
-
-    def _retrieve_candidates(self, db: Session, repo_vec: List[float], analysis_data: Dict[str, Any]) -> List[ProblemStatement]:
-        """Retrieve candidate problem statements from PostgreSQL using vector cosine distance and domain matching."""
-        candidate_ids = []
-        try:
-            vec_str = "[" + ",".join(f"{x:.6f}" for x in repo_vec) + "]"
-            sql = text("SELECT id FROM problem_statements ORDER BY embedding <=> (:vec)::vector LIMIT 25;")
-            result = db.execute(sql, {"vec": vec_str}).fetchall()
-            candidate_ids = [r[0] for r in result]
-        except Exception as e:
-            logger.warning(f"Vector search failed: {e}. Falling back to domain query.")
-
-        # Also include candidates matching target domain themes & signals
-        domains = analysis_data.get("target_domains", [])
-        if domains:
-            try:
-                domain_conds = " OR ".join([f"theme ILIKE :d{i}" for i in range(len(domains))])
-                params = {f"d{i}": f"%{d.split('/')[0].strip()}%" for i, d in enumerate(domains)}
-                domain_sql = text(f"SELECT id FROM problem_statements WHERE {domain_conds} LIMIT 15;")
-                d_result = db.execute(domain_sql, params).fetchall()
-                for r in d_result:
-                    if r[0] not in candidate_ids:
-                        candidate_ids.append(r[0])
-            except Exception as e:
-                logger.warning(f"Domain search failed: {e}")
-
-        if candidate_ids:
-            return db.query(ProblemStatement).filter(ProblemStatement.id.in_(candidate_ids)).all()
-
-        return db.query(ProblemStatement).limit(30).all()
 
     def _score_match(
         self,

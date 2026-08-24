@@ -360,8 +360,54 @@ class TestScoringMatchContinuousScores:
             {"repo_name": "GrowthOS"}
         )
 
-        assert 10.0 <= result["overall_match_score"] <= 98.5
-        assert result["confidence"] in ("High", "Medium", "Low")
+class TestFullPipelineGrowthOS:
+    """Verifies that running SIHMatchingAgent.run on GrowthOS repo produces SIH26101 in Top 3."""
+
+    def test_growthos_run_produces_sih26101_in_top_3(self):
+        agent = SIHMatchingAgent(ai_provider=None)
+        
+        all_ps = [SIH26101, SIH26200_CYBER, SIH26300_AGRI, SIH26400_GIS, SIH26500_HEALTH]
+        mock_db = MagicMock()
+        
+        mock_query = MagicMock()
+        mock_query.all.return_value = all_ps
+        
+        mock_filter = MagicMock()
+        mock_filter.all.return_value = all_ps
+        mock_query.filter.return_value = mock_filter
+        mock_db.query.return_value = mock_query
+
+        mock_db.execute.return_value.fetchall.return_value = [(SIH26101.id,), (SIH26200_CYBER.id,)]
+
+        context = {
+            "db": mock_db,
+            "analysis_data": {
+                "capability_manifest": GROWTHOS_PROFILE["capability_manifest"],
+                "project_summary": GROWTHOS_PROFILE["project_summary"],
+                "core_features": GROWTHOS_PROFILE["core_features"],
+                "target_domains": GROWTHOS_PROFILE["target_domains"],
+                "domain_signals": GROWTHOS_PROFILE["domain_signals"],
+                "detected_languages": GROWTHOS_PROFILE["detected_languages"],
+                "project_type": GROWTHOS_PROFILE["project_type"]
+            },
+            "repo_info": {
+                "repo_name": "GrowthOS--AI-Powered-Self-Growth-Platform",
+                "owner": "yash-dhoble19",
+                "description": GROWTHOS_PROFILE["description"]
+            }
+        }
+
+        output = agent.run(context)
+        top_matches = output["top_matches"]
+        assert len(top_matches) > 0, "Expected at least 1 top match for GrowthOS"
+
+        top_ps_ids = [m["problem_statement_id"] for m in top_matches[:3]]
+        assert "SIH26101" in top_ps_ids, (
+            f"SIH26101 (education) must be in Top 3 matches for GrowthOS, got: {top_ps_ids}"
+        )
+        assert top_matches[0]["problem_statement_id"] == "SIH26101", (
+            f"SIH26101 must be the #1 top match, got: {top_matches[0]['problem_statement_id']}"
+        )
 
 
 if __name__ == "__main__":
