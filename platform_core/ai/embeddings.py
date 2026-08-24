@@ -1,13 +1,16 @@
 """
 Embedding Providers and Vector Generation for pgvector similarity matching.
+Includes active fallback detection and reporting.
 """
 
 import math
 import hashlib
+import logging
 import re
 from typing import List, Optional
-import numpy as np
 from platform_core.config import settings
+
+logger = logging.getLogger("sih_platform.ai.embeddings")
 
 
 class EmbeddingProvider:
@@ -22,6 +25,14 @@ class EmbeddingProvider:
 
     def __init__(self, provider: str = "auto"):
         self.provider = provider or settings.EMBEDDING_PROVIDER
+        self._fallback_active = False
+
+    @property
+    def is_fallback_active(self) -> bool:
+        """Indicates whether local deterministic projection fallback is actively being used."""
+        if self.provider != "openai" or not settings.OPENAI_API_KEY:
+            return True
+        return self._fallback_active
 
     def get_embedding(self, text: str) -> List[float]:
         """Generate a 384-dimensional normalized unit vector for the given text."""
@@ -41,11 +52,13 @@ class EmbeddingProvider:
                     dimensions=self.DIMENSION
                 )
                 vec = resp.data[0].embedding
+                self._fallback_active = False
                 return self._normalize(vec)
             except Exception as e:
-                # Fallback to semantic projection
-                pass
+                logger.warning(f"OpenAI embedding call failed: {e}. Switching to deterministic fallback.")
+                self._fallback_active = True
 
+        self._fallback_active = True
         return self._local_semantic_embedding(cleaned)
 
     def _local_semantic_embedding(self, text: str) -> List[float]:
@@ -68,7 +81,9 @@ class EmbeddingProvider:
             "crop": 2.0, "water": 2.0, "flood": 2.5, "weather": 2.0, "robotics": 3.0,
             "drone": 2.5, "uav": 2.5, "hardware": 2.0, "software": 1.5, "react": 2.0,
             "fastapi": 2.0, "python": 1.5, "database": 1.8, "postgres": 2.0, "mobile": 1.8,
-            "dashboard": 1.8, "prediction": 2.2, "alert": 2.0, "warning": 2.0, "detection": 2.0
+            "dashboard": 1.8, "prediction": 2.2, "alert": 2.0, "warning": 2.0, "detection": 2.0,
+            "education": 2.8, "learning": 2.8, "roadmap": 2.5, "quiz": 2.5, "tutoring": 2.8,
+            "mastery": 2.5, "coach": 2.5, "curriculum": 2.5, "skill": 2.5, "pedagogy": 2.8
         }
 
         for w in words:

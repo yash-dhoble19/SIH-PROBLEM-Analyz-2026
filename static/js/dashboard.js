@@ -560,6 +560,15 @@ ${p.expected_solution || 'N/A'}`;
                         </div>
                     ` : ''}
 
+                    ${data.embedding_fallback_active ? `
+                        <div style="background:rgba(251,146,60,0.12);border:1px solid rgba(251,146,60,0.4);color:#fdba74;padding:12px 16px;border-radius:var(--radius-md);margin-bottom:1.25rem;font-size:0.82rem;display:flex;align-items:flex-start;gap:10px;">
+                            <span style="font-size:1.3rem;line-height:1;">🔌</span>
+                            <div>
+                                <strong style="color:#fb923c;">Embedding Fallback Active — Semantic Scores Degraded</strong><br/>
+                                <span style="color:#fdba74;">No real embedding API key is configured. Semantic similarity scores are computed using a deterministic local hash instead of a neural embedding model. Match scores may be less accurate. Configure an OpenAI or Google AI API key in <code style="background:rgba(0,0,0,0.3);padding:2px 5px;border-radius:3px;">.env</code> to enable full-fidelity scoring.</span>
+                            </div>
+                        </div>
+                    ` : ''}
                     ${data.grounded_capabilities && data.grounded_capabilities.length > 0 ? `
                         <div style="margin-bottom:1.5rem;">
                             <div style="font-size:0.75rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Verified Codebase Capabilities (Citations)</div>

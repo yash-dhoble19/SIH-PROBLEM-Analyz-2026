@@ -449,7 +449,8 @@ class RepositoryStaticAnalyzer:
         # Domain Patterns to Match
         capability_lexicon = [
             ("Time-Series Demand Forecasting", [r"forecast", r"prophet", r"arima", r"predict_demand", r"demand_forecast"], "forecasting", "Supply Chain & Analytics"),
-            ("Vehicle Routing & Optimization", [r"routing", r"route_opt", r"dijkstra", r"dispatch", r"fleet", r"osrm"], "routing", "Transportation & Logistics"),
+            ("Vehicle Routing & Optimization", [r"vehicle_routing", r"fleet_routing", r"route_optimization", r"route_opt", r"dijkstra", r"dispatch", r"fleet_mgmt", r"osrm"], "routing", "Transportation & Logistics"),
+            ("Smart Education & AI Tutoring", [r"roadmap", r"quiz", r"tutoring", r"curriculum", r"pedagogy", r"mastery", r"career_coach", r"career_coaching", r"learning_path", r"quiz_generator", r"edtech", r"learner"], "education", "Smart Education"),
             ("Web Scraping & DOM Extraction", [r"scraper", r"beautifulsoup", r"bs4", r"crawl", r"scrape", r"html_parser"], "scraping", "Smart Automation"),
             ("Webhook Automation & Event Dispatch", [r"webhook", r"event_dispatch", r"hmac", r"listener", r"callback", r"subscription"], "webhook", "Smart Automation"),
             ("Geospatial Mapping & GIS", [r"geopandas", r"folium", r"shapely", r"coordinates", r"spatial", r"geojson"], "geospatial", "Disaster Management & GIS"),

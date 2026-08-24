@@ -160,7 +160,8 @@ def test_multi_service_capability_detection():
         ]
     }
 
-    gap_agent = GapAnalysisAgent()
+    from platform_core.ai.providers import HeuristicAIProvider
+    gap_agent = GapAnalysisAgent(ai_provider=HeuristicAIProvider())
     gap_res = gap_agent.run({
         "analysis_data": {
             "capability_manifest": manifest,

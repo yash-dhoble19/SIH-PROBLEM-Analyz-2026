@@ -117,10 +117,17 @@ class ProjectUnderstandingAgent(BaseAgent):
                 evidence = [f"{path}: {func['name']}()" for func in f.get("functions", [])] + [f"{path}: class {cls['name']}" for cls in f.get("classes", [])]
                 self._merge_capability(capabilities_map, name, evidence, "Supply Chain & Analytics", path)
 
-            if "rout" in path_lower or "dispatch" in path_lower or "fleet" in path_lower:
+            # Check for vehicle/fleet routing specifically, not generic web API router
+            if "vehicle_rout" in path_lower or "fleet_rout" in path_lower or "route_opt" in path_lower or "dispatch" in path_lower or "fleet_mgmt" in path_lower:
                 name = "Vehicle Routing & Optimization"
                 evidence = [f"{path}: {func['name']}()" for func in f.get("functions", [])] + [f"{path}: class {cls['name']}" for cls in f.get("classes", [])]
                 self._merge_capability(capabilities_map, name, evidence, "Transportation & Logistics", path)
+
+            # Check for Education / Learning / Career Coaching / Quiz Generation
+            if any(k in path_lower for k in ["career_coach", "coach", "tutor", "quiz", "roadmap", "mastery", "curriculum", "pedagogy", "planner"]):
+                name = "Smart Education & AI Tutoring"
+                evidence = [f"{path}: {func['name']}()" for func in f.get("functions", [])] + [f"{path}: class {cls['name']}" for cls in f.get("classes", [])]
+                self._merge_capability(capabilities_map, name, evidence, "Smart Education", path)
 
             if "scrape" in path_lower or "crawler" in path_lower or "parser" in path_lower:
                 name = "Web Scraping & DOM Extraction"
@@ -161,7 +168,8 @@ class ProjectUnderstandingAgent(BaseAgent):
         for cap in capabilities_list:
             c_name = cap["name"].lower()
             if "forecast" in c_name: domain_signals.add("forecasting")
-            if "rout" in c_name: domain_signals.add("routing")
+            if "vehicle routing" in c_name: domain_signals.add("routing")
+            if "education" in c_name or "tutoring" in c_name or "roadmap" in c_name or "coach" in c_name or "quiz" in c_name: domain_signals.add("education")
             if "scrape" in c_name: domain_signals.add("scraping")
             if "webhook" in c_name: domain_signals.add("webhook")
             if "geospatial" in c_name or "gis" in c_name: domain_signals.add("geospatial")
@@ -212,10 +220,15 @@ class ProjectUnderstandingAgent(BaseAgent):
         all_text = f"{repo_name} {repo_desc} {readme_text}".lower()
         domains = []
 
-        if "forecasting" in signals or "routing" in signals or re.search(r"\b(logistics|supply[-_ ]chain|inventory|warehouse|fleet)\b", all_text):
-            domains.append("Transportation & Logistics")
+        if "education" in signals or re.search(r"\b(education|edtech|learning|roadmap|tutoring|quiz|mastery|curriculum|pedagogy|career[-_ ]coach|career[-_ ]coaching|competenc)\b", all_text):
+            domains.append("Smart Education")
             domains.append("Smart Automation")
-        if "productivity" in signals or re.search(r"\b(note|notes|journal|habit|productivity|self[-_ ]growth)\b", all_text):
+        if "forecasting" in signals or "routing" in signals or re.search(r"\b(logistics|supply[-_ ]chain|inventory|warehouse|freight|fleet)\b", all_text):
+            if "Transportation & Logistics" not in domains:
+                domains.append("Transportation & Logistics")
+            if "Smart Automation" not in domains:
+                domains.append("Smart Automation")
+        if "productivity" in signals or re.search(r"\b(note|notes|journal|diary|habit[-_ ]tracker|markdown[-_ ]editor)\b", all_text):
             domains.append("Personal Productivity & Note-Taking")
         if "scraping" in signals or "webhook" in signals:
             if "Smart Automation" not in domains:

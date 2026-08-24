@@ -167,6 +167,9 @@ def get_analysis_overview(analysis_id: str, db: Session = Depends(get_db)):
         })
 
     repo = analysis.repository
+    from platform_core.ai.embeddings import EmbeddingProvider
+    embedder = EmbeddingProvider()
+
     return {
         "analysis_id": str(analysis.id),
         "repository_url": repo.github_url,
@@ -187,6 +190,8 @@ def get_analysis_overview(analysis_id: str, db: Session = Depends(get_db)):
         "project_summary": analysis.project_summary,
         "is_low_confidence": getattr(analysis, "is_low_confidence", False) or False,
         "confidence_warning": getattr(analysis, "confidence_warning", None),
+        "domain_mismatch_warning": getattr(analysis, "domain_mismatch_warning", False) or False,
+        "embedding_fallback_active": embedder.is_fallback_active,
         "matches": matches_data
     }
 

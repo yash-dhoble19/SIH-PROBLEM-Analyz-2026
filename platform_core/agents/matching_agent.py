@@ -6,6 +6,7 @@ and 6-factor multi-dimensional scoring against the structured Capability Manifes
 
 import json
 import logging
+import math
 import re
 from typing import Dict, Any, List, Set, Optional
 from sqlalchemy.orm import Session
@@ -41,7 +42,15 @@ class SIHMatchingAgent(BaseAgent):
         ps_desc = getattr(problem_statement, "description", problem_statement.get("description") if isinstance(problem_statement, dict) else "")
         ps_sol = getattr(problem_statement, "expected_solution", problem_statement.get("expected_solution") if isinstance(problem_statement, dict) else "") or "N/A"
 
-        prompt = f"""You are an expert AI software architect evaluating whether a user's GitHub repository matches a government hackathon (Smart India Hackathon 2026) problem statement.
+        # Fast Pre-filter: Check deterministic domain compatibility first
+        heuristic_res = self._heuristic_intent_assessment(repo_profile, ps_id, ps_title, ps_theme, ps_desc, ps_sol, ps_bg)
+        if not heuristic_res.get("domain_match", True) or heuristic_res.get("aim_alignment_score", 0) >= 80:
+            return heuristic_res
+
+        # Try LLM Provider for ambiguous edge cases
+        if self.ai_provider and not isinstance(self.ai_provider, HeuristicAIProvider):
+            try:
+                prompt = f"""You are an expert AI software architect evaluating whether a user's GitHub repository matches a government hackathon (Smart India Hackathon 2026) problem statement.
 
 CRITICAL INSTRUCTION:
 "Two projects can share a programming language or an 'AI/ML' label while solving completely unrelated problems. Judge on WHAT PROBLEM IS BEING SOLVED, not on tech stack. If the repo's stated purpose and the problem statement's expected solution do not share the same real-world domain and goal, domain_match must be false regardless of any technical similarity."
@@ -66,19 +75,10 @@ Evaluate whether this repository's actual purpose and real-world goal match what
 Respond ONLY with a valid JSON object:
 {{
   "solves_same_core_problem": true,
-  "aim_alignment_score": 85,
+  "aim_alignment_score": 85.0,
   "domain_match": true,
   "reasoning": "2-3 sentences explaining why it is or is not a match based on real-world intent and problem scope"
 }}"""
-
-        # Fast Pre-filter: Check deterministic domain compatibility first to save tokens & avoid rate limits
-        heuristic_res = self._heuristic_intent_assessment(repo_profile, ps_title, ps_theme, ps_desc, ps_sol, ps_bg)
-        if not heuristic_res.get("domain_match", True) or heuristic_res.get("aim_alignment_score", 0) >= 80:
-            return heuristic_res
-
-        # Try LLM Provider for ambiguous edge cases
-        if self.ai_provider and not isinstance(self.ai_provider, HeuristicAIProvider):
-            try:
                 system_prompt = (
                     "You are a strict, objective AI software architect evaluating hackathon problem-solution fit. "
                     "You must ruthlessly filter out false positives where projects share only programming language or AI tags."
@@ -92,14 +92,23 @@ Respond ONLY with a valid JSON object:
                         "reasoning": str(res.get("reasoning", ""))
                     }
             except Exception as e:
-                logger.warning(f"LLM intent assessment failed: {e}. Falling back to semantic heuristic.")
+                logger.warning(f"LLM intent assessment failed for {ps_id}: {e}. Falling back to continuous semantic heuristic.")
 
         return heuristic_res
 
-    def _heuristic_intent_assessment(self, repo_profile: Dict[str, Any], ps_title: str, ps_theme: str, ps_desc: str, ps_sol: str, ps_bg: str) -> Dict[str, Any]:
+    def _heuristic_intent_assessment(
+        self,
+        repo_profile: Dict[str, Any],
+        ps_id: str,
+        ps_title: str,
+        ps_theme: str,
+        ps_desc: str,
+        ps_sol: str,
+        ps_bg: str
+    ) -> Dict[str, Any]:
         """
         Deterministic intent evaluation comparing real-world problem domain clusters.
-        Prevents false positives (e.g. note-taking vs network security).
+        Computes dynamic continuous scores without silent hardcoded constants.
         """
         repo_text = (
             f"{repo_profile.get('repo_name', '')} "
@@ -113,107 +122,118 @@ Respond ONLY with a valid JSON object:
         ps_text = f"{ps_title} {ps_theme} {ps_desc} {ps_sol} {ps_bg}".lower()
 
         domain_clusters = {
+            "education_edtech": {
+                "keywords": ["education", "learning", "student", "teacher", "school", "curriculum", "exam", "quiz", "classroom", "edtech", "tutoring", "pedagogy", "roadmap", "mastery", "career coach", "skill gap", "competency", "career guidance", "upskilling", "study"],
+                "label": "Smart Education & Skill Development",
+                "themes": ["smart education", "education"]
+            },
             "cyber_security": {
-                "keywords": ["security", "cyber", "firewall", "vulnerability", "audit", "compliance", "encryption", "intrusion", "soc", "siem", "ddos", "packet", "malware", "phishing", "threat", "penetration", "access control", "privilege"],
-                "label": "Cybersecurity & Network Defense"
+                "keywords": ["firewall", "vulnerability scan", "penetration testing", "encryption", "intrusion detection", "soc", "siem", "ddos", "packet inspection", "malware", "ransomware", "phishing attack", "threat signature", "zero-day", "cybercrime", "network defense"],
+                "label": "Cybersecurity & Network Defense",
+                "themes": ["blockchain & cybersecurity", "cybersecurity", "security"]
             },
             "productivity_notes": {
-                "keywords": ["note", "notes", "journal", "habit", "productivity", "self-growth", "task", "todo", "diary", "reminder", "personal organizer", "markdown notes", "bullet journal", "daily planner"],
-                "label": "Personal Productivity & Note-Taking"
+                "keywords": ["note", "notes", "journal", "habit tracker", "todo list", "diary", "reminder app", "personal organizer", "markdown notes", "bullet journal", "daily planner"],
+                "label": "Personal Productivity & Note-Taking",
+                "themes": ["miscellaneous"]
             },
             "healthcare_neuro": {
-                "keywords": ["health", "medical", "disease", "patient", "eeg", "alzheimer", "dementia", "mental", "hospital", "clinical", "biomedical", "diagnosis", "doctor", "cognitive", "neurology", "cardio", "vital"],
-                "label": "Healthcare & Biomedical Systems"
+                "keywords": ["health", "medical", "disease", "patient", "eeg", "alzheimer", "dementia", "mental health", "hospital", "clinical", "biomedical", "diagnosis", "doctor", "cognitive", "neurology", "vital signs"],
+                "label": "Healthcare & Biomedical Systems",
+                "themes": ["medtech / biotech / healthtech", "healthcare"]
             },
             "disaster_gis": {
-                "keywords": ["landslide", "disaster", "flood", "earthquake", "weather", "gis", "hazard", "terrain", "rain", "meteorolog", "cyclone", "avalanche", "satellite", "geospatial", "sensor stream"],
-                "label": "Disaster Management & Geospatial Warning"
+                "keywords": ["landslide", "disaster", "flood", "earthquake", "weather warning", "gis", "hazard map", "terrain slope", "cyclone", "avalanche", "satellite warning", "geospatial warning", "sensor stream"],
+                "label": "Disaster Management & Geospatial Warning",
+                "themes": ["disaster management", "gis"]
             },
             "supply_chain_logistics": {
-                "keywords": ["supply chain", "logistics", "warehouse", "inventory", "shipping", "freight", "fleet", "transport", "consignment", "cargo", "route optimization", "delivery tracking", "demand forecast"],
-                "label": "Supply Chain & Smart Logistics"
+                "keywords": ["supply chain", "logistics", "warehouse", "inventory", "shipping", "freight", "fleet", "consignment", "cargo", "route optimization", "delivery tracking", "demand forecast", "vessel chartering"],
+                "label": "Supply Chain & Smart Logistics",
+                "themes": ["transportation & logistics", "logistics"]
             },
             "agriculture_crops": {
-                "keywords": ["agriculture", "crop", "farming", "soil", "farmer", "irrigation", "pest", "harvest", "fertilizer", "yield", "agritech", "horticulture", "paddy", "wheat"],
-                "label": "Agriculture & Smart Farming"
-            },
-            "education_edtech": {
-                "keywords": ["education", "learning", "student", "teacher", "school", "curriculum", "exam", "quiz", "classroom", "edtech", "tutoring", "pedagogy"],
-                "label": "Education & Smart Learning"
+                "keywords": ["agriculture", "crop", "farming", "soil moisture", "farmer", "irrigation", "pest detection", "harvest", "fertilizer", "yield estimation", "agritech", "horticulture", "paddy", "wheat"],
+                "label": "Agriculture & Smart Farming",
+                "themes": ["agriculture, foodtech & rural development", "agriculture"]
             },
             "legal_judiciary": {
-                "keywords": ["legal", "court", "law", "case", "bail", "judge", "justice", "advocate", "litigation", "statute", "tribunal", "police fir"],
-                "label": "Legal Tech & Judicial Governance"
+                "keywords": ["legal", "court", "law", "case file", "bail", "judge", "justice", "advocate", "litigation", "statute", "tribunal", "police fir"],
+                "label": "Legal Tech & Judicial Governance",
+                "themes": ["smart automation", "miscellaneous"]
             }
         }
 
+        # Count keyword hits in clusters
         repo_cluster_scores = {}
         for c_key, c_data in domain_clusters.items():
-            hits = sum(1 for kw in c_data["keywords"] if re.search(r'\b' + re.escape(kw) + r'\b', repo_text))
+            hits = sum(1 for kw in c_data["keywords"] if kw in repo_text)
             if hits > 0:
                 repo_cluster_scores[c_key] = hits
 
         ps_cluster_scores = {}
         for c_key, c_data in domain_clusters.items():
-            hits = sum(1 for kw in c_data["keywords"] if re.search(r'\b' + re.escape(kw) + r'\b', ps_text))
+            hits = sum(1 for kw in c_data["keywords"] if kw in ps_text)
             if hits > 0:
                 ps_cluster_scores[c_key] = hits
 
         top_repo_cluster = max(repo_cluster_scores.items(), key=lambda x: x[1])[0] if repo_cluster_scores else None
         top_ps_cluster = max(ps_cluster_scores.items(), key=lambda x: x[1])[0] if ps_cluster_scores else None
 
-        # 1. Direct Theme Match Check
+        # 1. Direct Theme Match Check with continuous scoring
         target_domains = [d.lower() for d in repo_profile.get("target_domains", [])]
-        theme_match = any(d in ps_theme.lower() or ps_theme.lower() in d for d in target_domains) or (
-            ps_theme.lower() in ("miscellaneous", "smart automation")
-        )
+        ps_theme_lower = ps_theme.lower()
 
-        if theme_match:
-            return {
-                "solves_same_core_problem": True,
-                "aim_alignment_score": 85.0,
-                "domain_match": True,
-                "reasoning": f"Domain theme '{ps_theme}' aligns with the project's identified target domains."
-            }
+        # Compute keyword overlap between repo text and problem statement
+        repo_words = set(re.findall(r'\b[a-z]{4,}\b', repo_text))
+        ps_words = set(re.findall(r'\b[a-z]{4,}\b', ps_text))
+        common_words = repo_words.intersection(ps_words)
+        jaccard = len(common_words) / max(1, len(repo_words.union(ps_words)))
 
-        # 2. Direct Cluster Match
+        # Direct cluster alignment
         if top_repo_cluster and top_ps_cluster and top_repo_cluster == top_ps_cluster:
             matched_label = domain_clusters[top_repo_cluster]["label"]
+            score = round(78.0 + min(20.0, jaccard * 150 + (ps_cluster_scores[top_ps_cluster] * 2)), 1)
             return {
                 "solves_same_core_problem": True,
-                "aim_alignment_score": 88.0,
+                "aim_alignment_score": score,
                 "domain_match": True,
-                "reasoning": f"Strong intent alignment: Both the codebase and the problem statement focus directly on '{matched_label}', sharing core functional goals."
+                "reasoning": f"Strong intent alignment: Both the codebase and the problem statement focus directly on '{matched_label}' ({score:.1f}% intent score)."
             }
 
-        # 3. Hard Incompatibility Veto
-        if top_repo_cluster == "productivity_notes" and top_ps_cluster != "productivity_notes":
-            ps_label = domain_clusters.get(top_ps_cluster, {}).get("label", ps_theme)
+        # Check theme compatibility
+        theme_matched = any(d in ps_theme_lower or ps_theme_lower in d for d in target_domains)
+        if theme_matched:
+            score = round(70.0 + min(25.0, jaccard * 180 + len(common_words)), 1)
             return {
-                "solves_same_core_problem": False,
-                "aim_alignment_score": 15.0,
-                "domain_match": False,
-                "reasoning": f"Intent mismatch: The repository is dedicated to 'Personal Productivity & Note-Taking', whereas the SIH problem statement requires solutions for '{ps_label}'. Shared technical tags like Python or AI do not satisfy domain intent."
+                "solves_same_core_problem": True,
+                "aim_alignment_score": score,
+                "domain_match": True,
+                "reasoning": f"Domain theme '{ps_theme}' aligns with project target domains ({score:.1f}% aim score, {len(common_words)} shared domain terms)."
             }
 
+        # Hard Incompatibility Veto for disjoint clusters
         if top_repo_cluster and top_ps_cluster and top_repo_cluster != top_ps_cluster:
             repo_score = repo_cluster_scores.get(top_repo_cluster, 0)
             ps_score = ps_cluster_scores.get(top_ps_cluster, 0)
             if repo_score >= 2 and ps_score >= 2:
                 repo_label = domain_clusters[top_repo_cluster]["label"]
                 ps_label = domain_clusters[top_ps_cluster]["label"]
+                veto_score = round(max(10.0, min(30.0, jaccard * 100)), 1)
                 return {
                     "solves_same_core_problem": False,
-                    "aim_alignment_score": 20.0,
+                    "aim_alignment_score": veto_score,
                     "domain_match": False,
-                    "reasoning": f"Intent mismatch: The repository is dedicated to '{repo_label}', whereas the SIH problem statement requires solutions for '{ps_label}'. Shared technical tags like Python or AI do not satisfy domain intent."
+                    "reasoning": f"Intent mismatch: The repository is dedicated to '{repo_label}', whereas the SIH problem statement requires solutions for '{ps_label}' ({veto_score:.1f}% aim score)."
                 }
 
+        # Continuous generic compatibility score
+        generic_score = round(40.0 + min(35.0, jaccard * 200 + len(common_words) * 2), 1)
         return {
             "solves_same_core_problem": True,
-            "aim_alignment_score": 60.0,
+            "aim_alignment_score": generic_score,
             "domain_match": True,
-            "reasoning": f"Cross-domain functional compatibility observed with '{ps_theme}'."
+            "reasoning": f"Cross-domain functional compatibility observed with '{ps_theme}' ({generic_score:.1f}% aim alignment)."
         }
 
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -259,6 +279,7 @@ Respond ONLY with a valid JSON object:
 
         # Generate vector embedding
         repo_vec = self.embedder.get_embedding(project_rep)
+        embedding_fallback_active = self.embedder.is_fallback_active
 
         # Retrieve candidate problem statements from PostgreSQL
         candidates = self._retrieve_candidates(db, repo_vec, analysis_data)
@@ -282,13 +303,13 @@ Respond ONLY with a valid JSON object:
                 continue
 
             # 2. 6-Factor Multi-Dimensional Alignment Scoring against Capability Manifest
-            score_data = self._score_match(ps, analysis_data, repo_vec, intent_result, manifest)
+            score_data = self._score_match(ps, analysis_data, repo_vec, intent_result, manifest, repo_info)
             scored_matches.append(score_data)
 
         # Sort by overall match score descending
         scored_matches.sort(key=lambda x: x["overall_match_score"], reverse=True)
         
-        # Ensure we provide at least top 3 matches (up to 6)
+        # Ensure we provide top 3 matches (up to 6)
         top_matches = scored_matches[:max(3, min(6, len(scored_matches)))]
 
         # -------------------------------------------------------------
@@ -305,7 +326,6 @@ Respond ONLY with a valid JSON object:
             top_aim = top_m.get("aim_alignment_score", 0.0)
             top_feature = top_m.get("feature_alignment", 50.0)
             
-            # If tech is low (< 55%) and feature overlap/reusability is low (< 30%) but aim/intent score is high (> 75%)
             if top_tech < 55.0 and top_feature < 30.0 and top_aim > 75.0:
                 domain_mismatch_warning = True
                 top_m["domain_mismatch_warning"] = True
@@ -323,6 +343,7 @@ Respond ONLY with a valid JSON object:
         return {
             "project_representation": project_rep,
             "repo_embedding": repo_vec,
+            "embedding_fallback_active": embedding_fallback_active,
             "top_matches": top_matches,
             "vetoed_matches": vetoed_matches,
             "domain_mismatch_warning": domain_mismatch_warning,
@@ -335,11 +356,11 @@ Respond ONLY with a valid JSON object:
         candidate_ids = []
         try:
             vec_str = "[" + ",".join(f"{x:.6f}" for x in repo_vec) + "]"
-            sql = text("SELECT id FROM problem_statements ORDER BY embedding <=> (:vec)::vector LIMIT 20;")
+            sql = text("SELECT id FROM problem_statements ORDER BY embedding <=> (:vec)::vector LIMIT 25;")
             result = db.execute(sql, {"vec": vec_str}).fetchall()
             candidate_ids = [r[0] for r in result]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}. Falling back to domain query.")
 
         # Also include candidates matching target domain themes & signals
         domains = analysis_data.get("target_domains", [])
@@ -347,18 +368,18 @@ Respond ONLY with a valid JSON object:
             try:
                 domain_conds = " OR ".join([f"theme ILIKE :d{i}" for i in range(len(domains))])
                 params = {f"d{i}": f"%{d.split('/')[0].strip()}%" for i, d in enumerate(domains)}
-                domain_sql = text(f"SELECT id FROM problem_statements WHERE {domain_conds} LIMIT 10;")
+                domain_sql = text(f"SELECT id FROM problem_statements WHERE {domain_conds} LIMIT 15;")
                 d_result = db.execute(domain_sql, params).fetchall()
                 for r in d_result:
                     if r[0] not in candidate_ids:
                         candidate_ids.append(r[0])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Domain search failed: {e}")
 
         if candidate_ids:
             return db.query(ProblemStatement).filter(ProblemStatement.id.in_(candidate_ids)).all()
 
-        return db.query(ProblemStatement).limit(25).all()
+        return db.query(ProblemStatement).limit(30).all()
 
     def _score_match(
         self,
@@ -366,11 +387,14 @@ Respond ONLY with a valid JSON object:
         analysis_data: Dict[str, Any],
         repo_vec: List[float],
         intent_result: Dict[str, Any],
-        manifest: Dict[str, Any]
+        manifest: Dict[str, Any],
+        repo_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Calculates 6-factor alignment score against the Capability Manifest with domain alignment penalty."""
+        """Calculates 6-factor alignment score against the Capability Manifest with dynamic continuous overlap metrics."""
         # 1. Aim/Intent Alignment (30%)
-        aim_score = round(float(intent_result.get("aim_alignment_score", 75.0)), 1)
+        aim_score = round(float(intent_result.get("aim_alignment_score", 0.0)), 1)
+        if aim_score <= 0.0:
+            logger.warning(f"Zero aim_score computed for repo '{(repo_info or {}).get('repo_name')}' vs PS '{ps.id}'. Intent result: {intent_result}")
 
         # 2. Semantic Similarity (20%)
         ps_vec = ps.embedding
@@ -378,50 +402,54 @@ Respond ONLY with a valid JSON object:
             raw_sim = self.embedder.cosine_similarity(repo_vec, list(ps_vec))
             semantic_score = round(raw_sim * 100, 1)
         else:
-            semantic_score = 65.0
+            logger.warning(f"Missing vector embedding for PS '{ps.id}'. Computing term overlap semantic score.")
+            ps_text = (ps.title + " " + ps.description).lower()
+            manifest_caps = [c["name"].lower() for c in manifest.get("capabilities", [])]
+            hits = sum(1 for c in manifest_caps if any(w in ps_text for w in c.split()))
+            semantic_score = round(min(90.0, max(20.0, 30.0 + hits * 15.0)), 1)
 
         # 3. Feature / Capability Alignment (20%)
         manifest_caps = [c["name"].lower() for c in manifest.get("capabilities", [])]
         features = [f.lower() for f in analysis_data.get("core_features", [])]
-        all_feature_terms = manifest_caps + features
+        all_feature_terms = list(set(manifest_caps + features))
         
         ps_text = (ps.title + " " + ps.description + " " + (ps.expected_solution or "")).lower()
         
         feature_hits = sum(1 for f in all_feature_terms if any(w in ps_text for w in f.split() if len(w) > 3))
-        feature_score = min(100.0, round((feature_hits / max(1, len(all_feature_terms))) * 100 + 20, 1)) if all_feature_terms else 50.0
+        feature_score = min(100.0, round((feature_hits / max(1, len(all_feature_terms))) * 100, 1)) if all_feature_terms else 30.0
 
-        # 4. Domain Alignment (10%) comparing manifest.domain_signals against PS
+        # 4. Domain Alignment (10%) continuous calculation
         domain_signals = [s.lower() for s in (manifest.get("domain_signals") or analysis_data.get("domain_signals") or [])]
+        target_domains = [d.lower() for d in analysis_data.get("target_domains", [])]
         ps_theme_lower = ps.theme.lower()
         ps_org_lower = ps.organization.lower()
         
-        signal_overlap = False
-        domain_score = 45.0
-
         domain_signal_theme_map = {
-            "forecasting": ["logistics", "transportation", "supply chain", "demand", "smart automation", "agriculture"],
-            "routing": ["logistics", "transportation", "travel", "fleet", "smart automation"],
-            "scraping": ["smart automation", "data", "miscellaneous"],
+            "education": ["smart education", "education", "skill", "learning", "pedagogy", "tutoring", "student"],
+            "forecasting": ["transportation & logistics", "logistics", "supply chain", "demand", "smart automation", "agriculture"],
+            "routing": ["transportation & logistics", "logistics", "travel", "fleet", "smart automation"],
+            "scraping": ["smart automation", "software", "miscellaneous"],
             "webhook": ["smart automation", "software", "miscellaneous"],
             "geospatial": ["disaster management", "gis", "agriculture", "environment"],
             "cybersecurity": ["blockchain & cybersecurity", "cyber", "security", "defense"],
-            "healthcare": ["medtech / biotech / healthtech", "health", "medical", "hospital"]
+            "healthcare": ["medtech / biotech / healthtech", "healthcare", "medical", "hospital"]
         }
 
+        # Calculate continuous signal hit ratio
+        matching_signal_count = 0
         for sig in domain_signals:
-            themes = domain_signal_theme_map.get(sig, [])
+            themes = domain_signal_theme_map.get(sig, [sig])
             if any(t in ps_theme_lower or t in ps_org_lower or t in ps_text for t in themes):
-                signal_overlap = True
-                break
+                matching_signal_count += 1
 
-        if signal_overlap:
-            domain_score = 95.0
-        elif any(d.lower() in ps_theme_lower for d in analysis_data.get("target_domains", [])):
-            domain_score = 85.0
+        if matching_signal_count > 0:
+            domain_score = round(min(98.0, 65.0 + (matching_signal_count * 12.0)), 1)
+        elif any(d in ps_theme_lower or ps_theme_lower in d for d in target_domains):
+            domain_score = 75.0
         elif ps_theme_lower in ("miscellaneous", "smart automation"):
-            domain_score = 70.0
+            domain_score = 55.0
         else:
-            domain_score = 30.0
+            domain_score = 25.0
 
         # 5. Tech Capability Alignment (10%)
         tech_score = 80.0
@@ -429,7 +457,7 @@ Respond ONLY with a valid JSON object:
             if "Hardware / IoT / Embedded System" in analysis_data.get("project_type", ""):
                 tech_score = 90.0
             else:
-                tech_score = 40.0
+                tech_score = 35.0
 
         # 6. Expected Solution Alignment (10%)
         sol_score = round((semantic_score * 0.5 + feature_score * 0.5), 1)
@@ -445,9 +473,9 @@ Respond ONLY with a valid JSON object:
             1
         )
 
-        # Apply low domain overlap penalty if domain_score is very low (< 40)
-        if domain_score < 40.0:
-            overall = round(overall * 0.85, 1)
+        # Apply low domain overlap penalty if domain_score is very low (< 35)
+        if domain_score < 35.0:
+            overall = round(overall * 0.82, 1)
 
         overall = max(10.0, min(98.5, overall))
         confidence = "High" if overall >= 80 else ("Medium" if overall >= 60 else "Low")

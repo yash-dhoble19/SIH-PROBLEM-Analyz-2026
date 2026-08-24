@@ -69,6 +69,7 @@ class AnalysisOverviewResponse(BaseModel):
     is_low_confidence: Optional[bool] = False
     confidence_warning: Optional[str] = None
     domain_mismatch_warning: Optional[bool] = False
+    embedding_fallback_active: Optional[bool] = False
     matches: List[ProblemMatchResponse] = []
 
 
