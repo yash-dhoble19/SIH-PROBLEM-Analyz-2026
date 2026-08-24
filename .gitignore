@@ -1,0 +1,43 @@
+# Environment & Secrets
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+.Python
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data
+data/*.db
+*.sqlite3
+
+# System
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.benchmarks/
+htmlcov/
+.coverage
+
+# Gemini & Agent IDE
+.gemini/
+.agents/
