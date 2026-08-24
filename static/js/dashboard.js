@@ -690,6 +690,105 @@ ${p.expected_solution || 'N/A'}`;
                     </table>
                 </div>
 
+                <!-- Pivot Advisor: Transform Your Project to Match This -->
+                ${d.pivot_advisor ? `
+                <div style="background:linear-gradient(145deg, rgba(168,85,247,0.08), rgba(6,182,212,0.08));border:1px solid rgba(168,85,247,0.35);border-radius:var(--radius-lg);padding:1.5rem;margin-bottom:1.5rem;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;" onclick="App.togglePivotAdvisorCard()">
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <span style="font-size:1.4rem;">🔄</span>
+                            <div>
+                                <h3 style="font-size:1.1rem;font-weight:800;color:#c084fc;margin:0;">
+                                    Transform Your Project to Match This
+                                </h3>
+                                <div style="font-size:0.8rem;color:var(--text-muted);margin-top:2px;">
+                                    Actionable Pivot Strategy &middot; Reusability: ${Math.round(d.pivot_advisor.reusability_score)}% &middot; Domain Alignment: ${Math.round(d.pivot_advisor.domain_alignment)}%
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <span class="ps-cat-badge" style="background:rgba(168,85,247,0.2);color:#d8b4fe;border:1px solid rgba(168,85,247,0.4);">
+                                Pivot Strategy
+                            </span>
+                            <span id="pivot-toggle-icon" style="font-size:1.1rem;color:var(--text-muted);transition:transform 0.2s;">▼</span>
+                        </div>
+                    </div>
+
+                    <div id="pivot-advisor-body" style="display:block;margin-top:1.25rem;padding-top:1.25rem;border-top:1px solid rgba(255,255,255,0.08);">
+                        <p style="font-size:0.875rem;color:var(--text-secondary);line-height:1.6;margin-bottom:1.25rem;background:rgba(0,0,0,0.25);padding:10px 14px;border-radius:var(--radius-md);border-left:3px solid #c084fc;">
+                            ${escapeHtml(d.pivot_advisor.transformation_summary || '')}
+                        </p>
+
+                        <!-- Two Columns: What You Can Reuse vs. What You'd Need to Add -->
+                        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));gap:1.25rem;margin-bottom:1.5rem;">
+                            <!-- Column 1: What You Can Reuse -->
+                            <div style="background:var(--bg-input);border:1px solid rgba(34,197,94,0.25);border-radius:var(--radius-md);padding:1.1rem;">
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                                    <span style="color:#4ade80;font-size:1.1rem;">✅</span>
+                                    <h4 style="font-size:0.95rem;font-weight:700;color:#4ade80;margin:0;">What You Can Reuse</h4>
+                                </div>
+                                <div style="display:flex;flex-direction:column;gap:10px;">
+                                    ${(d.pivot_advisor.reused_foundations || []).map(rf => `
+                                        <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:var(--radius-sm);padding:10px;">
+                                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                                                <strong style="font-size:0.85rem;color:#fff;">${escapeHtml(rf.capability)}</strong>
+                                                <span class="status-pill status-MATCH" style="font-size:0.65rem;padding:2px 6px;">REUSE</span>
+                                            </div>
+                                            <div style="font-size:0.775rem;color:var(--text-muted);margin-bottom:4px;">
+                                                <code>${escapeHtml(rf.source_evidence)}</code>
+                                            </div>
+                                            <div style="font-size:0.8rem;color:var(--text-secondary);line-height:1.4;">
+                                                ${escapeHtml(rf.reuse_mechanism)}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+
+                            <!-- Column 2: What You'd Need to Add -->
+                            <div style="background:var(--bg-input);border:1px solid rgba(249,115,22,0.25);border-radius:var(--radius-md);padding:1.1rem;">
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                                    <span style="color:#fb923c;font-size:1.1rem;">⚡</span>
+                                    <h4 style="font-size:0.95rem;font-weight:700;color:#fb923c;margin:0;">What You'd Need to Add</h4>
+                                </div>
+                                <div style="display:flex;flex-direction:column;gap:10px;">
+                                    ${(d.pivot_advisor.required_additions || []).map(ra => `
+                                        <div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:var(--radius-sm);padding:10px;">
+                                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+                                                <strong style="font-size:0.85rem;color:#fff;">${escapeHtml(ra.feature)}</strong>
+                                                <span class="status-pill status-${ra.priority.includes('P0') ? 'MISSING' : 'PARTIAL'}" style="font-size:0.65rem;padding:2px 6px;">${escapeHtml(ra.priority)} &middot; ${escapeHtml(ra.effort_estimate)}</span>
+                                            </div>
+                                            <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:4px;">
+                                                <strong>Why:</strong> ${escapeHtml(ra.why_needed)}
+                                            </div>
+                                            <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:4px;">
+                                                <strong>Approach:</strong> ${escapeHtml(ra.build_approach)}
+                                            </div>
+                                            <div style="font-size:0.75rem;color:var(--text-muted);">
+                                                Target: <code>${escapeHtml(ra.integration_target)}</code>
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Copy-Paste Transformation Prompt -->
+                        <div style="background:var(--bg-terminal);border:1px solid rgba(168,85,247,0.3);border-radius:var(--radius-md);padding:1.2rem;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
+                                    <span class="ps-id-badge" style="background:#7e22ce;">PIVOT PROMPT</span>
+                                    <span style="font-size:0.9rem;font-weight:700;color:#fff;">Copy-Paste Transformation Prompt (Cursor / Claude Code / Antigravity)</span>
+                                </div>
+                                <button class="btn-glow-purple" style="padding:5px 14px;font-size:0.75rem;" onclick="App.copyPromptText('pivot-advisor-prompt-text')">
+                                    📋 Copy Pivot Prompt
+                                </button>
+                            </div>
+                            <pre id="pivot-advisor-prompt-text" style="font-family:var(--font-mono);font-size:0.78rem;color:#cbd5e1;white-space:pre-wrap;max-height:280px;overflow-y:auto;line-height:1.6;">${escapeHtml(d.pivot_advisor.copy_paste_prompt || '')}</pre>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+
                 <!-- Phased Implementation Plan -->
                 <div style="background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:1.5rem;margin-bottom:1.5rem;">
                     <h3 style="font-size:1.05rem;font-weight:700;color:var(--text-purple);margin-bottom:0.4rem;">
@@ -759,6 +858,19 @@ ${p.expected_solution || 'N/A'}`;
         }
     }
 
+    function togglePivotAdvisorCard() {
+        const body = document.getElementById('pivot-advisor-body');
+        const icon = document.getElementById('pivot-toggle-icon');
+        if (!body) return;
+        if (body.style.display === 'none') {
+            body.style.display = 'block';
+            if (icon) icon.textContent = '▼';
+        } else {
+            body.style.display = 'none';
+            if (icon) icon.textContent = '▶';
+        }
+    }
+
     function backToMatches() {
         document.getElementById('match-deep-panel').style.display = 'none';
         document.getElementById('repo-results-panel').style.display = 'block';
@@ -817,9 +929,11 @@ ${p.expected_solution || 'N/A'}`;
         toggleBookmarkFilter,
         startAnalysis,
         showDeepMatch,
+        togglePivotAdvisorCard,
         backToMatches,
         copyPromptText,
         exportJSON,
         exportCSV
     };
 })();
+

@@ -227,9 +227,10 @@ def get_match_detail(match_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Match not found.")
 
     # Ensure Gap Analysis and Roadmap are computed
+    pipeline_res = None
     if not match.gap_analysis or not match.implementation_plan:
         pipeline = MultiAgentPipeline(db)
-        pipeline.run_deep_gap_and_roadmap(match)
+        pipeline_res = pipeline.run_deep_gap_and_roadmap(match)
         db.refresh(match)
 
     ps = match.problem_statement
@@ -239,6 +240,51 @@ def get_match_detail(match_id: str, db: Session = Depends(get_db)):
     gap = match.gap_analysis
     plan = match.implementation_plan
     prompts = match.prompts
+
+    # Compute or retrieve Pivot Advisor
+    pivot_advisor_data = None
+    if pipeline_res and "pivot_advisor" in pipeline_res:
+        pivot_advisor_data = pipeline_res["pivot_advisor"]
+    else:
+        from platform_core.agents.pivot_advisor_agent import PivotAdvisorAgent
+        pivot_agent = PivotAdvisorAgent()
+        domain_alignment = getattr(match, "domain_alignment", 0.0) or 0.0
+        reusability = gap.reusability_score if gap else 0.0
+        if pivot_agent.should_trigger(domain_alignment, reusability):
+            manifest_caps = [
+                {"name": gc.get("capability"), "evidence": [gc.get("source")] if gc.get("source") else ["Codebase"], "confidence": gc.get("confidence", 0.95)}
+                for gc in (analysis.grounded_capabilities or [])
+            ]
+            pivot_context = {
+                "capability_manifest": {
+                    "capabilities": manifest_caps,
+                    "domain_signals": analysis.target_domains or [],
+                    "tech_stack": analysis.detected_languages or []
+                },
+                "requirement_matrix": gap.requirement_matrix if gap else [],
+                "problem_statement": {
+                    "id": ps.id,
+                    "title": ps.title,
+                    "organization": ps.organization,
+                    "theme": ps.theme,
+                    "category": ps.category,
+                    "description": ps.description,
+                    "expected_solution": ps.expected_solution
+                },
+                "domain_alignment": domain_alignment,
+                "reusability_score": reusability,
+                "analysis_data": {
+                    "backend_framework": analysis.backend_framework,
+                    "frontend_framework": analysis.frontend_framework,
+                    "detected_languages": analysis.detected_languages or ["Python"],
+                    "ml_capabilities": analysis.ml_capabilities or []
+                },
+                "repo_info": {
+                    "repo_name": repo.repo_name,
+                    "owner": repo.owner
+                }
+            }
+            pivot_advisor_data = pivot_agent.run(pivot_context)
 
     return {
         "match_id": str(match.id),
@@ -282,6 +328,7 @@ def get_match_detail(match_id: str, db: Session = Depends(get_db)):
             "summary_findings": gap.summary_findings if gap else "",
             "requirement_matrix": gap.requirement_matrix if gap else []
         },
+        "pivot_advisor": pivot_advisor_data,
         "implementation_plan": {
             "architecture_overview": plan.architecture_overview if plan else "",
             "estimated_effort": plan.estimated_effort if plan else "",
@@ -298,6 +345,79 @@ def get_match_detail(match_id: str, db: Session = Depends(get_db)):
             for p in prompts
         ]
     }
+
+
+@router.post("/pivot-advisor")
+def get_pivot_advisor_advice(payload: Dict[str, Any], db: Session = Depends(get_db)):
+    """Computes project transformation recommendations to pivot towards a target problem statement."""
+    match_id = payload.get("match_id")
+    if not match_id:
+        raise HTTPException(status_code=400, detail="match_id is required.")
+
+    try:
+        m_uuid = uuid.UUID(match_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid match ID format.")
+
+    match = db.query(ProblemMatch).filter(ProblemMatch.id == m_uuid).first()
+    if not match:
+        raise HTTPException(status_code=404, detail="Match not found.")
+
+    if not match.gap_analysis or not match.implementation_plan:
+        pipeline = MultiAgentPipeline(db)
+        pipeline.run_deep_gap_and_roadmap(match)
+        db.refresh(match)
+
+    from platform_core.agents.pivot_advisor_agent import PivotAdvisorAgent
+    pivot_agent = PivotAdvisorAgent()
+
+    domain_alignment = getattr(match, "domain_alignment", 0.0) or 0.0
+    gap = match.gap_analysis
+    reusability = gap.reusability_score if gap else 0.0
+    ps = match.problem_statement
+    analysis = match.analysis
+    repo = analysis.repository
+
+    if not pivot_agent.should_trigger(domain_alignment, reusability):
+        return {
+            "is_applicable": False,
+            "message": f"Pivot advice is not applicable (domain_alignment={domain_alignment}%, reusability={reusability}%). Requires 15% <= domain_alignment AND reusability < 80%."
+        }
+
+    manifest_caps = [
+        {"name": gc.get("capability"), "evidence": [gc.get("source")] if gc.get("source") else ["Codebase"], "confidence": gc.get("confidence", 0.95)}
+        for gc in (analysis.grounded_capabilities or [])
+    ]
+    pivot_context = {
+        "capability_manifest": {
+            "capabilities": manifest_caps,
+            "domain_signals": analysis.target_domains or [],
+            "tech_stack": analysis.detected_languages or []
+        },
+        "requirement_matrix": gap.requirement_matrix if gap else [],
+        "problem_statement": {
+            "id": ps.id,
+            "title": ps.title,
+            "organization": ps.organization,
+            "theme": ps.theme,
+            "category": ps.category,
+            "description": ps.description,
+            "expected_solution": ps.expected_solution
+        },
+        "domain_alignment": domain_alignment,
+        "reusability_score": reusability,
+        "analysis_data": {
+            "backend_framework": analysis.backend_framework,
+            "frontend_framework": analysis.frontend_framework,
+            "detected_languages": analysis.detected_languages or ["Python"],
+            "ml_capabilities": analysis.ml_capabilities or []
+        },
+        "repo_info": {
+            "repo_name": repo.repo_name,
+            "owner": repo.owner
+        }
+    }
+    return pivot_agent.run(pivot_context)
 
 
 @router.get("/reports/{match_id}/export")

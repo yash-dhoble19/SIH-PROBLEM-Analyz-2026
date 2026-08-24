@@ -80,6 +80,31 @@ class RequirementGapItem(BaseModel):
     reason: str
 
 
+class ReusedFoundationItem(BaseModel):
+    capability: str
+    source_evidence: str
+    reuse_mechanism: str
+
+
+class RequiredAdditionItem(BaseModel):
+    feature: str
+    priority: str
+    effort_estimate: str
+    why_needed: str
+    build_approach: str
+    integration_target: str
+
+
+class PivotAdvisorResponse(BaseModel):
+    is_applicable: bool = True
+    domain_alignment: float
+    reusability_score: float
+    transformation_summary: str
+    reused_foundations: List[ReusedFoundationItem] = []
+    required_additions: List[RequiredAdditionItem] = []
+    copy_paste_prompt: str
+
+
 class GapAnalysisResponse(BaseModel):
     match_id: str
     problem_statement_id: str
@@ -87,6 +112,7 @@ class GapAnalysisResponse(BaseModel):
     reusability_score: float
     summary_findings: str
     requirement_matrix: List[RequirementGapItem] = []
+    pivot_advisor: Optional[PivotAdvisorResponse] = None
 
 
 class ImplementationPhaseItem(BaseModel):
@@ -118,3 +144,4 @@ class GeneratedPromptItem(BaseModel):
 class PromptsResponse(BaseModel):
     match_id: str
     prompts: List[GeneratedPromptItem] = []
+

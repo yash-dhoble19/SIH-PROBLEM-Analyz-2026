@@ -31,6 +31,7 @@ from platform_core.agents.gap_analysis_agent import GapAnalysisAgent
 from platform_core.agents.solution_architect_agent import SolutionArchitectAgent
 from platform_core.agents.implementation_planner_agent import ImplementationPlannerAgent
 from platform_core.agents.prompt_generator_agent import PromptGeneratorAgent
+from platform_core.agents.pivot_advisor_agent import PivotAdvisorAgent
 
 logger = logging.getLogger("sih_platform.orchestrator")
 
@@ -50,6 +51,7 @@ class MultiAgentPipeline:
         self.solution_architect_agent = SolutionArchitectAgent()
         self.planner_agent = ImplementationPlannerAgent()
         self.prompt_agent = PromptGeneratorAgent()
+        self.pivot_agent = PivotAdvisorAgent()
 
     def run_repository_analysis(self, repo: Repository, job: Optional[AnalysisJob] = None) -> RepositoryAnalysis:
         """Executes full repository understanding & top SIH problem matching."""
@@ -248,6 +250,31 @@ class MultiAgentPipeline:
         gap_res = self.gap_agent.execute_with_tracking(context, self.db, analysis.id)
         context["gap_data"] = gap_res
 
+        # Agent 10: Pivot Advisor (Triggered only when 15% <= domain_alignment AND reusability < 80%)
+        pivot_res = None
+        domain_alignment = getattr(match, "domain_alignment", 0.0) or 0.0
+        reusability_score = gap_res.get("reusability_score", 0.0)
+
+        if self.pivot_agent.should_trigger(domain_alignment, reusability_score):
+            pivot_context = {
+                "capability_manifest": reconstituted_manifest,
+                "requirement_matrix": gap_res.get("requirement_matrix", []),
+                "problem_statement": {
+                    "id": ps.id,
+                    "title": ps.title,
+                    "organization": ps.organization,
+                    "theme": ps.theme,
+                    "category": ps.category,
+                    "description": ps.description,
+                    "expected_solution": ps.expected_solution
+                },
+                "domain_alignment": domain_alignment,
+                "reusability_score": reusability_score,
+                "analysis_data": context["analysis_data"],
+                "repo_info": context["repo_info"]
+            }
+            pivot_res = self.pivot_agent.execute_with_tracking(pivot_context, self.db, analysis.id)
+
         # Agent 7: Solution Architect
         arch_res = self.solution_architect_agent.execute_with_tracking(context, self.db, analysis.id)
         context["arch_data"] = arch_res
@@ -304,6 +331,7 @@ class MultiAgentPipeline:
         self.db.commit()
         return {
             "gap_analysis": gap_res,
+            "pivot_advisor": pivot_res,
             "implementation_plan": plan_res,
             "prompts": prompt_res.get("generated_prompts", [])
         }
