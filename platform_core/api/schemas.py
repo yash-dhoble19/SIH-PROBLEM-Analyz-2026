@@ -40,6 +40,7 @@ class ProblemMatchResponse(BaseModel):
     existing_capabilities: List[str] = []
     missing_capabilities: List[str] = []
     reusable_components: List[str] = []
+    domain_mismatch_warning: Optional[bool] = False
 
 
 class GroundedCapabilityItem(BaseModel):
@@ -61,11 +62,13 @@ class AnalysisOverviewResponse(BaseModel):
     detected_features: List[str] = []
     grounded_capabilities: List[GroundedCapabilityItem] = []
     target_domains: List[str] = []
+    domain_signals: List[str] = []
     architectural_strengths: List[str] = []
     limitations: List[str] = []
     project_summary: Optional[str] = None
     is_low_confidence: Optional[bool] = False
     confidence_warning: Optional[str] = None
+    domain_mismatch_warning: Optional[bool] = False
     matches: List[ProblemMatchResponse] = []
 
 

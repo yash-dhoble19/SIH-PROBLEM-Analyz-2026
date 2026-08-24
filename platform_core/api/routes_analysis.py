@@ -162,7 +162,8 @@ def get_analysis_overview(analysis_id: str, db: Session = Depends(get_db)):
             "match_reasoning": m.match_reasoning,
             "existing_capabilities": m.existing_capabilities or [],
             "missing_capabilities": m.missing_capabilities or [],
-            "reusable_components": m.reusable_components or []
+            "reusable_components": m.reusable_components or [],
+            "domain_mismatch_warning": getattr(m, "domain_mismatch_warning", False) or False
         })
 
     repo = analysis.repository
@@ -180,6 +181,7 @@ def get_analysis_overview(analysis_id: str, db: Session = Depends(get_db)):
         "detected_features": analysis.detected_features or [],
         "grounded_capabilities": getattr(analysis, "grounded_capabilities", []) or [],
         "target_domains": analysis.target_domains or [],
+        "domain_signals": getattr(analysis, "target_domains", []) or [],
         "architectural_strengths": analysis.architectural_strengths or [],
         "limitations": analysis.limitations or [],
         "project_summary": analysis.project_summary,

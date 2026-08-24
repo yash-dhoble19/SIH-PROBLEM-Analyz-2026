@@ -18,13 +18,15 @@ class GitHubClient:
     IGNORED_DIRS = {
         ".git", "node_modules", "venv", ".venv", "env", "__pycache__",
         "dist", "build", ".next", ".nuxt", "coverage", ".idea", ".vscode",
-        "target", "vendor", "bin", "obj"
+        "target", "vendor", "bin", "obj", "tests", "test", "migrations",
+        "fixture", "fixtures", "__snapshots__"
     }
 
     IGNORED_EXTS = {
         ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".mp4",
         ".mp3", ".wav", ".zip", ".tar", ".gz", ".7z", ".pdf", ".exe",
-        ".dll", ".so", ".dylib", ".class", ".pyc", ".bin", ".iso", ".lock"
+        ".dll", ".so", ".dylib", ".class", ".pyc", ".bin", ".iso", ".lock",
+        ".min.js", ".min.css", ".map"
     }
 
     PRIORITY_FILENAMES = {
@@ -33,6 +35,13 @@ class GitHubClient:
         "docker-compose.yml", "docker-compose.yaml", "main.py", "app.py",
         "server.js", "index.js", "app.js", "schema.prisma", "models.py"
     }
+
+    SOURCE_DIR_PREFIXES = (
+        "api/", "routes/", "services/", "agents/", "core/", "src/",
+        "app/", "models/", "schemas/", "controllers/", "pipeline/", "lib/"
+    )
+
+    SOURCE_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rs", ".cpp", ".sql"}
 
     def __init__(self, token: Optional[str] = None):
         self.token = token or settings.GITHUB_TOKEN
@@ -67,7 +76,7 @@ class GitHubClient:
             }
 
     def fetch_file_tree(self, owner: str, repo: str, branch: str = "main") -> List[Dict[str, Any]]:
-        """Fetch repository file tree recursively (up to 1,000 files)."""
+        """Fetch repository file tree recursively (up to 1,000 files) prioritizing key source code."""
         url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
         with httpx.Client(timeout=20.0, headers=self.headers) as client:
             resp = client.get(url)
@@ -85,7 +94,7 @@ class GitHubClient:
                 path = item.get("path", "")
                 parts = path.split("/")
 
-                # Skip ignored directories
+                # Skip ignored directories anywhere in path
                 if any(p.lower() in self.IGNORED_DIRS for p in parts[:-1]):
                     continue
 
@@ -96,7 +105,14 @@ class GitHubClient:
                     continue
 
                 size = item.get("size", 0)
-                is_priority = (filename in self.PRIORITY_FILENAMES) or (len(parts) <= 3 and ext in (".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rs", ".cpp", ".sql"))
+
+                # Identify if this is a priority source file for deep content extraction
+                is_manifest_or_doc = filename in self.PRIORITY_FILENAMES
+                is_source_dir = any(path.lower().startswith(prefix) for prefix in self.SOURCE_DIR_PREFIXES) and ext in self.SOURCE_EXTENSIONS
+                is_top_level_source = len(parts) == 1 and ext in self.SOURCE_EXTENSIONS
+                is_shallow_source = len(parts) <= 3 and ext in self.SOURCE_EXTENSIONS and not any(p.lower() in self.IGNORED_DIRS for p in parts)
+
+                is_priority = is_manifest_or_doc or is_source_dir or is_top_level_source or is_shallow_source
 
                 filtered_files.append({
                     "path": path,

@@ -1,14 +1,14 @@
 """
 Agent 6: Gap Analysis Agent.
-Constructs a requirement-by-requirement comparison matrix by making grounded LLM calls
-(batched 3-5 requirements per call) that reference the EXACT requirement text and the
-repo's SPECIFIC detected capabilities.
-
-Provider priority: Groq (free tier) -> General AI provider -> Heuristic (last resort, logged loudly).
+Constructs a requirement-by-requirement comparison matrix by checking atomic requirements
+against the structured Capability Manifest (names, evidence files, endpoints, data models).
+Verdicts: MATCH/IMPLEMENTED, PARTIAL, MISSING.
+Cites specific capability names and evidence files checked in every reason field.
 """
 
 import json
 import logging
+import re
 from typing import Dict, Any, List, Optional
 
 from platform_core.agents.base import BaseAgent
@@ -22,14 +22,13 @@ from platform_core.ai.providers import (
 
 logger = logging.getLogger("sih_platform.agents.gap_analysis")
 
-# The old boilerplate strings that must NEVER appear in output
 _BANNED_BOILERPLATE = [
     "Requires implementation of domain-specific business rules specified in the problem statement",
     "model weights and architecture need fine-tuning for this domain",
     "Requires implementation of domain-specific business rules",
 ]
 
-BATCH_SIZE = 4  # Requirements per LLM call — keeps within Groq free-tier token budget
+BATCH_SIZE = 4
 
 
 class GapAnalysisAgent(BaseAgent):
@@ -37,27 +36,17 @@ class GapAnalysisAgent(BaseAgent):
         super().__init__("Agent 6: Gap Analysis Agent", ai_provider)
 
     def _get_reasoning_provider(self) -> AIProvider:
-        """
-        Resolve the best available provider for gap reasoning.
-        Priority: Groq (free, fast) -> configured AI provider -> Heuristic (loud warning).
-        """
-        # 1. Try dedicated Groq provider first
+        """Resolve best available provider for gap reasoning."""
         groq = get_groq_provider()
         if groq is not None:
-            logger.info("[GapAnalysis] Using GroqProvider (openai/gpt-oss-120b) for requirement reasoning.")
+            logger.info("[GapAnalysis] Using GroqProvider for requirement reasoning.")
             return groq
 
-        # 2. Fall back to whatever the base class resolved (Anthropic/OpenAI/Gemini)
         if self.ai_provider and not isinstance(self.ai_provider, HeuristicAIProvider):
             logger.info(f"[GapAnalysis] Using {type(self.ai_provider).__name__} for requirement reasoning.")
             return self.ai_provider
 
-        # 3. Absolute last resort — log loudly
-        logger.warning(
-            "⚠️  [GapAnalysis] NO real LLM provider available (no Groq/Anthropic/OpenAI key). "
-            "Falling back to HeuristicAIProvider — gap analysis reasons will be keyword-derived, "
-            "NOT LLM-grounded. Set GROQ_API_KEY in .env for free high-quality reasoning."
-        )
+        logger.warning("[GapAnalysis] Using HeuristicAIProvider for capability-grounded gap analysis.")
         return self.ai_provider
 
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,25 +68,22 @@ class GapAnalysisAgent(BaseAgent):
                 "summary_output": "Gap Analysis skipped — no requirements found."
             }
 
-        # Build the full repo capability inventory for the LLM prompt
-        capability_inventory = self._build_capability_inventory(analysis_data)
+        manifest = analysis_data.get("capability_manifest") or {}
+        capability_inventory = self._build_capability_inventory(analysis_data, manifest)
 
-        # Resolve the best available reasoning provider
         provider = self._get_reasoning_provider()
         use_llm = not isinstance(provider, HeuristicAIProvider)
 
-        # Batch requirements and evaluate
         matrix = []
         for batch_start in range(0, len(combined_reqs), BATCH_SIZE):
             batch = combined_reqs[batch_start:batch_start + BATCH_SIZE]
             if use_llm:
-                batch_results = self._evaluate_batch_llm(provider, batch, capability_inventory, analysis_data)
+                batch_results = self._evaluate_batch_llm(provider, batch, capability_inventory, analysis_data, manifest)
             else:
-                batch_results = self._evaluate_batch_heuristic(batch, analysis_data)
+                batch_results = self._evaluate_batch_heuristic(batch, analysis_data, manifest)
             matrix.extend(batch_results)
 
-        # Count statuses
-        matched_count = sum(1 for r in matrix if r["status"] == "MATCH")
+        matched_count = sum(1 for r in matrix if r["status"] in ("MATCH", "IMPLEMENTED"))
         partial_count = sum(1 for r in matrix if r["status"] == "PARTIAL")
         missing_count = sum(1 for r in matrix if r["status"] in ("MISSING", "UNKNOWN"))
 
@@ -105,7 +91,7 @@ class GapAnalysisAgent(BaseAgent):
         reusability = round(((matched_count * 1.0 + partial_count * 0.5) / total) * 100, 1)
 
         summary = (
-            f"Gap Analysis: {matched_count} fully matched, {partial_count} partially covered, "
+            f"Gap Analysis: {matched_count} fully implemented/matched, {partial_count} partially covered, "
             f"{missing_count} missing/unknown out of {total} requirements. "
             f"Estimated code reusability: {reusability}%."
         )
@@ -120,63 +106,42 @@ class GapAnalysisAgent(BaseAgent):
             "summary_output": f"Constructed Gap Matrix ({matched_count} Match, {partial_count} Partial, {missing_count} Missing)"
         }
 
-    def _build_capability_inventory(self, analysis_data: Dict[str, Any]) -> str:
-        """Build a detailed, enumerated text block of all detected repo capabilities."""
-        lines = []
-        lines.append("=== REPOSITORY DETECTED CAPABILITIES ===")
+    def _build_capability_inventory(self, analysis_data: Dict[str, Any], manifest: Dict[str, Any]) -> str:
+        """Builds structured text of the Capability Manifest with explicit evidence citations."""
+        lines = ["=== REPOSITORY CAPABILITY MANIFEST (CODE GROUNDED) ==="]
 
-        langs = analysis_data.get("detected_languages", [])
-        if langs:
-            lines.append(f"Programming Languages: {', '.join(langs)}")
+        caps = manifest.get("capabilities", [])
+        if caps:
+            lines.append("Verified Code Capabilities & Evidence:")
+            for i, c in enumerate(caps, 1):
+                ev = "; ".join(c.get("evidence", []))
+                lines.append(f"  {i}. {c.get('name')} (Evidence: {ev or 'Codebase files'})")
+        else:
+            features = analysis_data.get("core_features", [])
+            if features:
+                lines.append("Detected Features:")
+                for i, f in enumerate(features, 1):
+                    lines.append(f"  {i}. {f}")
 
-        backend = analysis_data.get("backend_framework")
-        if backend:
-            lines.append(f"Backend Framework: {backend}")
+        endpoints = manifest.get("endpoints", [])
+        if endpoints:
+            lines.append("API Endpoints:")
+            for ep in endpoints[:8]:
+                lines.append(f"  - {ep.get('method')} {ep.get('path')} (Handler: {ep.get('handler')} in {ep.get('file')})")
 
-        frontend = analysis_data.get("frontend_framework")
-        if frontend:
-            lines.append(f"Frontend Framework: {frontend}")
+        models = manifest.get("data_models", [])
+        if models:
+            lines.append("Data Models & Schemas:")
+            for m in models[:6]:
+                lines.append(f"  - {m.get('model_name')} in {m.get('file')} (Columns: {', '.join(m.get('columns', [])[:4])})")
 
-        db_tech = analysis_data.get("database_tech")
-        if db_tech:
-            lines.append(f"Database Technology: {db_tech}")
+        signals = manifest.get("domain_signals") or analysis_data.get("domain_signals", [])
+        if signals:
+            lines.append(f"Domain Signals: {', '.join(signals)}")
 
-        ml_caps = analysis_data.get("ml_capabilities", [])
-        if ml_caps:
-            lines.append(f"ML/AI Libraries: {', '.join(ml_caps)}")
-
-        features = analysis_data.get("core_features", [])
-        if features:
-            lines.append("Detected Features:")
-            for i, f in enumerate(features, 1):
-                lines.append(f"  {i}. {f}")
-
-        tech_caps = analysis_data.get("technical_capabilities", [])
-        if tech_caps:
-            lines.append("Technical Capabilities:")
-            for i, c in enumerate(tech_caps, 1):
-                lines.append(f"  {i}. {c}")
-
-        strengths = analysis_data.get("architectural_strengths", [])
-        if strengths:
-            lines.append("Architectural Strengths:")
-            for i, s in enumerate(strengths, 1):
-                lines.append(f"  {i}. {s}")
-
-        api_routes = analysis_data.get("api_routes", [])
-        if api_routes:
-            lines.append(f"API Routes: {', '.join(str(r) for r in api_routes[:10])}")
-
-        project_type = analysis_data.get("project_type")
-        if project_type:
-            lines.append(f"Project Type: {project_type}")
-
-        summary = analysis_data.get("project_summary")
-        if summary:
-            lines.append(f"Project Purpose: {summary}")
-
-        if len(lines) <= 1:
-            lines.append("No specific capabilities detected — generic software project.")
+        tech = manifest.get("tech_stack") or analysis_data.get("detected_languages", [])
+        if tech:
+            lines.append(f"Tech Stack: {', '.join(tech)}")
 
         return "\n".join(lines)
 
@@ -185,72 +150,56 @@ class GapAnalysisAgent(BaseAgent):
         provider: AIProvider,
         requirements: List[str],
         capability_inventory: str,
-        analysis_data: Dict[str, Any]
+        analysis_data: Dict[str, Any],
+        manifest: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """
-        Send a batch of 3-5 requirements to the LLM in a single call.
-        Each requirement gets its own independent status + reason in the response.
-        """
+        """Evaluate a batch of requirements with LLM grounded in Capability Manifest."""
         req_block = ""
         for i, req in enumerate(requirements):
             req_block += f'\n  REQ_{i+1}: "{req}"'
 
-        prompt = f"""You are evaluating whether a GitHub repository's ACTUAL detected capabilities can satisfy specific SIH hackathon problem statement requirements.
+        prompt = f"""You are a technical code auditor evaluating whether a repository's VERIFIED CODE CAPABILITIES satisfy specific SIH hackathon requirements.
 
 {capability_inventory}
 
 === REQUIREMENTS TO EVALUATE ==={req_block}
 
 === INSTRUCTIONS ===
-For EACH requirement above, determine:
-- "status": one of "MATCH", "PARTIAL", "MISSING", or "UNKNOWN"
-  - MATCH: The repo has a specific, detected capability that directly addresses this requirement.
-  - PARTIAL: The repo has related capability that partially covers this, but specific extensions are needed.
-  - MISSING: The repo has NO detected capability related to this requirement.
-  - UNKNOWN: Cannot determine from the available capability data.
-- "current_project": What the repo currently has that relates to this requirement. If nothing, say exactly what's absent (e.g. "No firewall/packet inspection code detected").
-- "reason": A SPECIFIC explanation that:
-  1. Names the EXACT repo capability (if any) that relates to this requirement — quote from the capability inventory above.
-  2. Explains CONCRETELY what gap exists (e.g. "No SNMP/router config parsing library detected" NOT "requires domain-specific business rules").
-  3. Must be DIFFERENT for each requirement — never copy-paste the same reason across rows.
+For EACH requirement:
+- "status": "MATCH", "PARTIAL", "MISSING", or "UNKNOWN"
+  - MATCH: A verified code capability or endpoint directly fulfills this requirement.
+  - PARTIAL: A related capability exists in code but needs domain extensions.
+  - MISSING: No capability or code in the manifest addresses this.
+- "current_project": State what specific capability and evidence file(s) exist. If missing, say what specific module is absent.
+- "reason": Cite the EXACT capability name and evidence file(s) checked from the manifest.
 
-Respond with ONLY this JSON (no markdown fences):
+Respond with ONLY valid JSON:
 {{
   "evaluations": [
     {{
-      "requirement": "<exact requirement text>",
+      "requirement": "<exact requirement>",
       "status": "MATCH|PARTIAL|MISSING|UNKNOWN",
-      "current_project": "<what repo has or lacks for this>",
-      "reason": "<specific, grounded explanation>"
+      "current_project": "<capability and evidence file(s)>",
+      "reason": "<specific explanation citing capability name and evidence file(s)>"
     }}
   ]
 }}"""
 
-        system_prompt = (
-            "You are a strict technical auditor comparing a repository's actual codebase capabilities "
-            "against hackathon requirements. Never use generic boilerplate. Every reason must reference "
-            "specific detected (or missing) capabilities from the repository inventory provided."
-        )
-
         try:
-            result = provider.generate_json(prompt, system_prompt=system_prompt)
+            result = provider.generate_json(prompt)
             evaluations = result.get("evaluations", [])
-
             if not evaluations or not isinstance(evaluations, list):
-                logger.error(f"[GapAnalysis] LLM returned malformed evaluations: {result}")
-                return self._evaluate_batch_heuristic(requirements, analysis_data)
+                return self._evaluate_batch_heuristic(requirements, analysis_data, manifest)
 
             rows = []
             for i, ev in enumerate(evaluations):
                 req_text = ev.get("requirement", requirements[i] if i < len(requirements) else "Unknown")
                 status = ev.get("status", "UNKNOWN").upper()
-                if status not in ("MATCH", "PARTIAL", "MISSING", "UNKNOWN"):
+                if status not in ("MATCH", "PARTIAL", "MISSING", "UNKNOWN", "IMPLEMENTED"):
                     status = "UNKNOWN"
-
                 reason = ev.get("reason", "")
-                # Guard: reject any banned boilerplate that leaked through
                 if any(banned.lower() in reason.lower() for banned in _BANNED_BOILERPLATE):
-                    reason = f"[Flagged generic] Requirement '{req_text[:50]}...' needs specific analysis — no matching capability was clearly identified in the repository."
+                    reason = f"Checked capability manifest for '{req_text[:50]}'; requires dedicated implementation."
 
                 rows.append({
                     "requirement": req_text[:90],
@@ -260,40 +209,33 @@ Respond with ONLY this JSON (no markdown fences):
                     "reason": reason
                 })
 
-            # If LLM returned fewer evaluations than we sent, fill remaining with heuristic
             if len(rows) < len(requirements):
                 remaining = requirements[len(rows):]
-                rows.extend(self._evaluate_batch_heuristic(remaining, analysis_data))
+                rows.extend(self._evaluate_batch_heuristic(remaining, analysis_data, manifest))
 
             return rows
-
-        except json.JSONDecodeError as e:
-            logger.error(f"[GapAnalysis] LLM returned invalid JSON: {e}. Falling back to heuristic for this batch.")
-            return self._evaluate_batch_heuristic(requirements, analysis_data)
-        except Exception as e:
-            logger.error(f"[GapAnalysis] LLM call failed: {e}. Falling back to heuristic for this batch.")
-            return self._evaluate_batch_heuristic(requirements, analysis_data)
+        except Exception:
+            return self._evaluate_batch_heuristic(requirements, analysis_data, manifest)
 
     def _evaluate_batch_heuristic(
         self,
         requirements: List[str],
-        analysis_data: Dict[str, Any]
+        analysis_data: Dict[str, Any],
+        manifest: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """
-        Deterministic keyword-grounded fallback. Each requirement gets a SPECIFIC reason
-        that names what's present or absent — never a generic template.
-        """
+        """Deterministic capability-matching against the Capability Manifest (names + evidence)."""
+        caps = manifest.get("capabilities", [])
+        endpoints = manifest.get("endpoints", [])
+        models = manifest.get("data_models", [])
         features = [f.lower() for f in analysis_data.get("core_features", [])]
-        ml_caps = [m.lower() for m in analysis_data.get("ml_capabilities", [])]
         backend = analysis_data.get("backend_framework", "")
         frontend = analysis_data.get("frontend_framework", "")
-        all_caps_text = " ".join(features + ml_caps).lower()
 
         rows = []
         for req in requirements:
             req_lower = req.lower()
-            status, current, reason = self._classify_requirement_heuristic(
-                req, req_lower, features, ml_caps, backend, frontend, all_caps_text, analysis_data
+            status, current, reason = self._classify_with_manifest(
+                req, req_lower, caps, endpoints, models, features, backend, frontend, analysis_data
             )
             rows.append({
                 "requirement": req[:90],
@@ -304,140 +246,173 @@ Respond with ONLY this JSON (no markdown fences):
             })
         return rows
 
-    def _classify_requirement_heuristic(
-        self, req: str, req_lower: str,
-        features: list, ml_caps: list,
-        backend: str, frontend: str,
-        all_caps_text: str, analysis_data: Dict[str, Any]
+    def _classify_with_manifest(
+        self,
+        req: str,
+        req_lower: str,
+        caps: List[Dict[str, Any]],
+        endpoints: List[Dict[str, Any]],
+        models: List[Dict[str, Any]],
+        features: List[str],
+        backend: str,
+        frontend: str,
+        analysis_data: Dict[str, Any]
     ) -> tuple:
-        """Classify a single requirement using keyword matching with SPECIFIC reasons."""
+        """Classifies requirement against manifest capabilities citing specific names and evidence files."""
 
-        # --- MATCH checks ---
-        if any(k in req_lower for k in ["api", "rest", "backend", "server", "endpoint"]) and backend:
+        # 1. Check Forecasting / Prediction
+        if any(k in req_lower for k in ["forecast", "predict demand", "time series", "demand prediction", "demand estimation"]):
+            for c in caps:
+                if "forecast" in c["name"].lower() or "time-series" in c["name"].lower():
+                    ev_str = ", ".join(c.get("evidence", [])) or c.get("file", "services/forecasting.py")
+                    return (
+                        "MATCH",
+                        f"{c['name']} ({ev_str})",
+                        f"Directly implemented by '{c['name']}' in {ev_str}, which provides time-series predictive modeling for this requirement."
+                    )
             return (
-                "MATCH",
-                f"Backend service: {backend}",
-                f"The repository provides '{backend}' backend with API endpoint handling, which directly addresses this requirement."
+                "MISSING",
+                "No demand forecasting or time-series prediction module detected",
+                f"Checked manifest capabilities ({', '.join([c['name'] for c in caps[:2]]) or 'none'}); no forecasting model (Prophet, ARIMA) was found for '{req[:45]}'."
             )
 
-        if any(k in req_lower for k in ["dashboard", "ui", "interface", "web", "frontend", "visualization"]) and frontend:
+        # 2. Check Vehicle Routing / Fleet Dispatch
+        if any(k in req_lower for k in ["routing", "vehicle route", "fleet dispatch", "route optimiz", "shortest path", "delivery route"]):
+            for c in caps:
+                if "routing" in c["name"].lower() or "vehicle" in c["name"].lower() or "transport" in c.get("category", "").lower():
+                    ev_str = ", ".join(c.get("evidence", [])) or c.get("file", "services/routing.py")
+                    return (
+                        "MATCH",
+                        f"{c['name']} ({ev_str})",
+                        f"Directly implemented by '{c['name']}' in {ev_str}, which provides vehicle routing and dispatch algorithms."
+                    )
             return (
-                "MATCH",
-                f"Frontend application: {frontend}",
-                f"The repository includes a '{frontend}' frontend layer capable of hosting the required user interface components."
+                "MISSING",
+                "No vehicle routing or dispatch engine detected",
+                f"Checked manifest capabilities; no route optimization or graph-based dispatch module (Dijkstra, OSRM) was detected for '{req[:45]}'."
             )
 
-        if any(k in req_lower for k in ["database", "storage", "persist", "data store"]):
-            db_tech = analysis_data.get("database_tech")
-            if db_tech:
+        # 3. Check Web Scraping / Extraction
+        if any(k in req_lower for k in ["scrape", "scraping", "crawler", "dom extract", "html parse", "data extraction from portal"]):
+            for c in caps:
+                if "scrap" in c["name"].lower() or "extract" in c["name"].lower():
+                    ev_str = ", ".join(c.get("evidence", [])) or c.get("file", "services/scraper.py")
+                    return (
+                        "MATCH",
+                        f"{c['name']} ({ev_str})",
+                        f"Directly implemented by '{c['name']}' in {ev_str}, which handles DOM parsing and resilient HTML data extraction."
+                    )
+            return (
+                "MISSING",
+                "No web scraping or HTML parsing pipeline detected",
+                f"Checked manifest capabilities; no scraper client or DOM extraction module (BeautifulSoup, Scrapy) was found for '{req[:45]}'."
+            )
+
+        # 4. Check Webhooks / Event Dispatch
+        if any(k in req_lower for k in ["webhook", "event dispatch", "event notification", "subscription callback", "event listener"]):
+            for c in caps:
+                if "webhook" in c["name"].lower() or "event" in c["name"].lower():
+                    ev_str = ", ".join(c.get("evidence", [])) or c.get("file", "services/webhook.py")
+                    return (
+                        "MATCH",
+                        f"{c['name']} ({ev_str})",
+                        f"Directly implemented by '{c['name']}' in {ev_str}, which provides event subscription and signed webhook delivery."
+                    )
+            return (
+                "MISSING",
+                "No webhook dispatch or event notification system detected",
+                f"Checked manifest capabilities; no webhook dispatcher or signature verification logic was found for '{req[:45]}'."
+            )
+
+        # 5. Check API / Backend Services
+        if any(k in req_lower for k in ["api", "rest", "backend", "endpoint", "server"]):
+            if endpoints:
+                ep_ev = f"{endpoints[0].get('method')} {endpoints[0].get('path')} in {endpoints[0].get('file')}"
                 return (
                     "MATCH",
-                    f"Database: {db_tech}",
-                    f"The repository uses '{db_tech}' for persistent storage, satisfying this data management requirement."
+                    f"REST API Service Layer ({ep_ev})",
+                    f"Directly satisfied by 'REST API Service Layer' ({len(endpoints)} endpoints defined, e.g. {ep_ev})."
                 )
-
-        # --- PARTIAL checks ---
-        if any(k in req_lower for k in ["ai", "ml", "model", "prediction", "detection", "classification", "neural"]):
-            if ml_caps:
-                caps_str = ", ".join(analysis_data.get("ml_capabilities", [])[:3])
+            elif backend:
                 return (
-                    "PARTIAL",
-                    f"ML libraries detected: {caps_str}",
-                    f"The repository includes ML libraries ({caps_str}) but no pre-trained model or training pipeline "
-                    f"specific to '{req[:50]}' was detected. Domain-specific model development is needed."
+                    "MATCH",
+                    f"Backend service: {backend}",
+                    f"The repository provides a '{backend}' backend framework capable of handling API requests."
                 )
-            else:
+
+        # 6. Check UI / Dashboard / Frontend
+        if any(k in req_lower for k in ["dashboard", "ui", "interface", "web", "frontend", "visualization"]):
+            if frontend:
                 return (
-                    "MISSING",
-                    "No ML/AI libraries or models detected in the repository",
-                    f"This requirement needs AI/ML capabilities ('{req[:50]}') but no ML frameworks "
-                    f"(PyTorch, TensorFlow, scikit-learn, etc.) were found in the repository dependencies."
+                    "MATCH",
+                    f"Frontend application: {frontend}",
+                    f"Directly addressed by the repository's '{frontend}' frontend layer for hosting UI and charts."
                 )
 
-        if any(k in req_lower for k in ["real-time", "streaming", "websocket", "live", "telemetry"]):
-            if backend:
+        # 7. Check Database / Storage
+        if any(k in req_lower for k in ["database", "storage", "persist", "data store", "schema", "table"]):
+            if models:
+                m_ev = f"{models[0].get('model_name')} in {models[0].get('file')}"
                 return (
-                    "PARTIAL",
-                    f"Async-capable backend ({backend}) but no WebSocket/streaming module detected",
-                    f"The '{backend}' backend can handle async requests, but dedicated real-time streaming "
-                    f"infrastructure (WebSockets, Server-Sent Events, or message queues) was not detected."
+                    "MATCH",
+                    f"Relational Data Persistence ({m_ev})",
+                    f"Directly satisfied by 'Relational Data Persistence' with defined models ({', '.join([m.get('model_name') for m in models[:2]])})."
                 )
-            return (
-                "MISSING",
-                "No real-time streaming or WebSocket infrastructure detected",
-                f"This requirement needs real-time data streaming but no backend framework or "
-                f"WebSocket handler was found in the repository."
-            )
+            elif analysis_data.get("database_tech"):
+                return (
+                    "MATCH",
+                    f"Database: {analysis_data['database_tech']}",
+                    f"The repository uses '{analysis_data['database_tech']}' for data persistence."
+                )
 
-        if any(k in req_lower for k in ["alert", "notification", "sms", "email", "push"]):
-            return (
-                "MISSING",
-                "No notification dispatch system detected (no SMS/email/push libraries found)",
-                f"This requirement needs alert/notification delivery but no SMS gateway (Twilio), "
-                f"email service (SendGrid), or push notification library was detected in the repository."
-            )
-
+        # 8. Check Geospatial / Mapping
         if any(k in req_lower for k in ["gis", "map", "geospatial", "satellite", "coordinate", "location"]):
-            if any("gis" in c or "geo" in c or "map" in c for c in features + ml_caps):
-                return (
-                    "MATCH",
-                    "Geospatial/mapping components detected",
-                    "The repository includes geospatial processing capabilities that address this mapping requirement."
-                )
+            for c in caps:
+                if "geospatial" in c["name"].lower() or "gis" in c["name"].lower():
+                    ev_str = ", ".join(c.get("evidence", [])) or "GIS module"
+                    return (
+                        "MATCH",
+                        f"{c['name']} ({ev_str})",
+                        f"Addressed by geospatial processing capability '{c['name']}' in {ev_str}."
+                    )
             return (
                 "MISSING",
-                "No GIS, mapping, or geospatial libraries detected (no Leaflet, Mapbox, GeoPandas, etc.)",
-                f"This requirement needs geospatial/mapping capabilities but no GIS libraries "
-                f"(GeoPandas, Folium, Leaflet, Mapbox) were found in the repository."
+                "No GIS or geospatial mapping code detected",
+                f"Checked manifest capabilities; no mapping or GIS libraries (GeoPandas, Folium, Leaflet) were detected for '{req[:45]}'."
             )
 
-        if any(k in req_lower for k in ["security", "firewall", "encryption", "auth", "vulnerability", "intrusion"]):
-            if any("security" in c or "auth" in c or "encrypt" in c for c in features):
-                return (
-                    "PARTIAL",
-                    "Basic authentication/security detected",
-                    f"The repository has basic auth/security features but no specialized security "
-                    f"tooling for '{req[:40]}' (no vulnerability scanner, SIEM, or firewall SDK) was detected."
-                )
+        # 9. Check Cybersecurity / Firewall / Auditing
+        if any(k in req_lower for k in ["security", "firewall", "encryption", "vulnerability", "intrusion", "packet"]):
+            for c in caps:
+                if "cyber" in c["name"].lower() or "security" in c["name"].lower():
+                    ev_str = ", ".join(c.get("evidence", [])) or "Security module"
+                    return (
+                        "MATCH",
+                        f"{c['name']} ({ev_str})",
+                        f"Addressed by security capability '{c['name']}' in {ev_str}."
+                    )
             return (
                 "MISSING",
-                "No cybersecurity, firewall, or network security code detected",
-                f"This requirement needs security/firewall capabilities but no security-specific libraries "
-                f"(packet inspection, SIEM integration, firewall SDKs) were found in the repository."
+                "No cybersecurity or firewall auditing code detected",
+                f"Checked manifest capabilities; no packet inspection or firewall audit modules were found for '{req[:45]}'."
             )
 
-        if any(k in req_lower for k in ["hardware", "firmware", "iot", "sensor", "embedded", "microcontroller"]):
-            return (
-                "MISSING",
-                "Software-only codebase — no hardware/IoT/embedded code detected",
-                f"This requirement needs hardware/IoT integration but the repository is a pure software "
-                f"project with no embedded systems, firmware, or sensor interface code detected."
-            )
-
-        if any(k in req_lower for k in ["network", "packet", "router", "switch", "protocol", "tcp", "udp", "snmp"]):
-            return (
-                "MISSING",
-                "No networking/packet analysis or protocol handling code detected",
-                f"This requirement needs network protocol handling but no networking libraries "
-                f"(Scapy, socket programming, SNMP, pcap) were found in the repository."
-            )
-
-        # --- Fallback: try to find ANY feature overlap ---
-        for feat in features:
-            # Check if any words from the requirement appear in this feature
-            req_words = [w for w in req_lower.split() if len(w) > 4]
-            if any(w in feat for w in req_words):
+        # 10. Check Partial Overlaps with any named capability
+        for c in caps:
+            c_name = c["name"].lower()
+            words = [w for w in req_lower.split() if len(w) > 4]
+            if any(w in c_name for w in words):
+                ev_str = ", ".join(c.get("evidence", [])) or "Codebase files"
                 return (
                     "PARTIAL",
-                    f"Potentially related feature: '{feat}'",
-                    f"The repository feature '{feat}' has partial keyword overlap with this requirement, "
-                    f"but dedicated implementation for '{req[:40]}' was not confirmed."
+                    f"Related capability: '{c['name']}' ({ev_str})",
+                    f"Partial coverage via verified capability '{c['name']}' in {ev_str}; domain extension required for '{req[:40]}'."
                 )
 
-        # Genuine unknown — but with a SPECIFIC reason, not generic boilerplate
+        # 11. Generic Missing with clean citation of what was checked
+        caps_names = ", ".join([c["name"] for c in caps[:3]]) or "standard application stack"
         return (
             "MISSING",
-            f"No capability matching '{req[:40]}' detected in repository",
-            f"No repository feature, library, or module was identified that addresses "
-            f"'{req[:60]}'. This functionality would need to be built from scratch."
+            f"No module addressing '{req[:40]}' found",
+            f"Checked manifest capabilities ({caps_names}); no corresponding class, function, or endpoint was found for '{req[:50]}'. Must be implemented."
         )

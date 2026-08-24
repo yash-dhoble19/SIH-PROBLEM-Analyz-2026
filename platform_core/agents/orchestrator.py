@@ -1,6 +1,7 @@
 """
 Multi-Agent Orchestrator Pipeline.
-Executes the end-to-end repository analysis, pgvector matching, gap analysis, and prompt generation.
+Executes the end-to-end repository analysis, pgvector matching, gap analysis, and prompt generation
+with code-grounded Capability Manifest propagation.
 """
 
 import logging
@@ -70,9 +71,9 @@ class MultiAgentPipeline:
         repo.primary_language = repo_info.get("primary_language", "Unknown")
         self.db.commit()
 
-        # 3. Select priority files to fetch content
-        self._update_job(job, 30, "Extracting and sanitizing key project files...")
-        priority_files = [f for f in file_tree if f.get("is_priority")][:10]
+        # 3. Select priority source files to fetch content (up to 30 files)
+        self._update_job(job, 30, "Extracting and sanitizing key project source files...")
+        priority_files = [f for f in file_tree if f.get("is_priority")][:30]
         file_contents = {}
 
         for f in priority_files:
@@ -93,7 +94,7 @@ class MultiAgentPipeline:
         self.db.commit()
 
         # 4. Run Static AST & Framework Analyzer
-        self._update_job(job, 45, "Running static code & architecture analysis...")
+        self._update_job(job, 45, "Running AST code inspection & architecture analysis...")
         static_analysis = RepositoryStaticAnalyzer.analyze_repository(repo_info, file_tree, file_contents)
 
         # Create Fresh Analysis Record & Bind to Job
@@ -124,13 +125,15 @@ class MultiAgentPipeline:
         }
 
         # 5. Agent 1: Repository Explorer
-        self._update_job(job, 55, "Agent 1: Exploring repository structure...")
+        self._update_job(job, 55, "Agent 1: Exploring repository structure and AST findings...")
         explorer_res = self.explorer_agent.execute_with_tracking(context, self.db, analysis.id)
+        context["explorer_findings"] = explorer_res
 
-        # 6. Agent 2: Project Understanding (Grounded & Validated)
-        self._update_job(job, 65, "Agent 2: Understanding project purpose & capabilities...")
+        # 6. Agent 2: Project Understanding (Builds Capability Manifest)
+        self._update_job(job, 65, "Agent 2: Synthesizing grounded Capability Manifest...")
         understanding_res = self.understanding_agent.execute_with_tracking(context, self.db, analysis.id)
         
+        manifest = understanding_res.get("capability_manifest", {})
         analysis.project_summary = understanding_res.get("project_summary")
         analysis.target_domains = understanding_res.get("target_domains")
         analysis.grounded_capabilities = understanding_res.get("grounded_capabilities", [])
@@ -145,9 +148,10 @@ class MultiAgentPipeline:
         analysis.limitations = arch_res.get("limitations")
         self.db.commit()
 
-        # 8. Agent 4: SIH Matching & pgvector Reranker
-        self._update_job(job, 85, "Agent 4: Searching and matching against SIH 2026 problem statements...")
+        # 8. Agent 4: SIH Matching & pgvector Reranker against Capability Manifest
+        self._update_job(job, 85, "Agent 4: Matching against SIH 2026 problem statements...")
         grounded_feature_names = [c["capability"] for c in understanding_res.get("grounded_capabilities", [])] if understanding_res.get("grounded_capabilities") else analysis.detected_features
+        
         match_context = {
             "db": self.db,
             "repo_info": repo_info,
@@ -158,15 +162,17 @@ class MultiAgentPipeline:
                 "core_features": grounded_feature_names,
                 "technical_capabilities": understanding_res.get("technical_capabilities", []),
                 "target_domains": analysis.target_domains,
+                "domain_signals": understanding_res.get("domain_signals", []),
                 "backend_framework": analysis.backend_framework,
                 "frontend_framework": analysis.frontend_framework,
-                "ml_capabilities": analysis.ml_capabilities
+                "ml_capabilities": analysis.ml_capabilities,
+                "capability_manifest": manifest
             }
         }
         matching_res = self.matching_agent.execute_with_tracking(match_context, self.db, analysis.id)
         analysis.embedding = matching_res.get("repo_embedding")
 
-        # Save Matches
+        # Save Matches (Top 3 to 6 matches)
         for m in matching_res.get("top_matches", []):
             match_row = ProblemMatch(
                 analysis_id=analysis.id,
@@ -199,6 +205,21 @@ class MultiAgentPipeline:
         analysis = match.analysis
         ps = match.problem_statement
 
+        # Reconstitute Capability Manifest from analysis grounded capabilities and static data
+        manifest_caps = []
+        for gc in (analysis.grounded_capabilities or []):
+            manifest_caps.append({
+                "name": gc.get("capability"),
+                "evidence": [gc.get("source")] if gc.get("source") else ["Codebase"],
+                "confidence": gc.get("confidence", 0.95)
+            })
+
+        reconstituted_manifest = {
+            "capabilities": manifest_caps,
+            "domain_signals": analysis.target_domains or [],
+            "tech_stack": analysis.detected_languages or []
+        }
+
         context = {
             "db": self.db,
             "problem_statement": ps,
@@ -210,7 +231,8 @@ class MultiAgentPipeline:
                 "backend_framework": analysis.backend_framework,
                 "frontend_framework": analysis.frontend_framework,
                 "database_tech": analysis.database_tech,
-                "ml_capabilities": analysis.ml_capabilities or []
+                "ml_capabilities": analysis.ml_capabilities or [],
+                "capability_manifest": reconstituted_manifest
             },
             "repo_info": {
                 "repo_name": analysis.repository.repo_name,

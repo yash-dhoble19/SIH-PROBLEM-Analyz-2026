@@ -1,5 +1,6 @@
 """
-Integration test for the 9-Agent Pipeline, Intent Alignment Guard, and Report Generation.
+Integration test for the 9-Agent Pipeline, Capability Manifest, Intent Alignment Guard,
+and Domain Mismatch Warning Guardrail.
 """
 
 import sys
@@ -13,6 +14,8 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from platform_core.database.connection import SessionLocal
 from platform_core.database.models import ProblemStatement, ProblemMatch, Repository, RepositoryAnalysis
+from platform_core.github.analyzer import RepositoryStaticAnalyzer
+from platform_core.agents.understanding_agent import ProjectUnderstandingAgent
 from platform_core.agents.matching_agent import SIHMatchingAgent
 from platform_core.agents.problem_analyst_agent import ProblemStatementAnalystAgent
 from platform_core.agents.gap_analysis_agent import GapAnalysisAgent
@@ -67,6 +70,71 @@ def test_intent_alignment_guard_regression():
     print("[PASS] Intent Guard correctly vetoed mismatched candidate with domain_match=False and low aim score.", flush=True)
 
 
+def test_domain_mismatch_warning_guardrail():
+    """
+    Guardrail Test:
+    Asserts that when intent score is high (> 75%) but technical capability score is low (< 55%)
+    and feature overlap is low (< 30%), the domain_mismatch_warning flag is set to True.
+    """
+    print("\n--- Running Domain Mismatch Warning Guardrail Test ---", flush=True)
+    matcher = SIHMatchingAgent()
+
+    # Create synthetic match data where intent is high but tech/reusability is low
+    mock_ps = type("MockPS", (), {
+        "id": "SIH26_HW_999",
+        "title": "Autonomous Agricultural Drone with Hardware Soil Moisture Probe Interfacing",
+        "theme": "Agriculture, FoodTech & Rural Development",
+        "category": "Hardware",
+        "organization": "Ministry of Agriculture",
+        "background": "Requires custom embedded firmware on microcontroller to interface with soil moisture probes.",
+        "description": "Develop a drone payload with SPI/I2C sensor integration and RTOS firmware.",
+        "expected_solution": "Embedded C firmware, hardware schematics, and sensor telemetry dispatch.",
+        "embedding": None
+    })()
+
+    mock_analysis_data = {
+        "project_type": "Web API Service",
+        "project_summary": "Agricultural commodity price tracker and web dashboard.",
+        "target_domains": ["Agriculture, FoodTech & Rural Development"],
+        "core_features": ["Web commodity dashboard"],
+        "technical_capabilities": ["Python", "FastAPI"],
+        "detected_languages": ["Python"],
+        "capability_manifest": {
+            "capabilities": [{"name": "Web Dashboard", "evidence": ["app.py"], "confidence": 0.9}],
+            "domain_signals": ["agriculture"],
+            "endpoints": [],
+            "data_models": []
+        }
+    }
+
+    intent_result = {
+        "solves_same_core_problem": True,
+        "aim_alignment_score": 85.0,
+        "domain_match": True,
+        "reasoning": "Both projects address agricultural solutions."
+    }
+
+    # Score match
+    scored = matcher._score_match(
+        mock_ps,
+        mock_analysis_data,
+        [0.0] * 384,
+        intent_result,
+        mock_analysis_data["capability_manifest"]
+    )
+
+    print(f"Scored Hardware Mismatch: {scored}", flush=True)
+    assert scored["tech_capability_score"] < 55.0, f"Expected tech score < 55 for software repo on hardware PS, got {scored['tech_capability_score']}"
+
+    # Verify guardrail condition
+    tech = scored["tech_capability_score"]
+    aim = scored["aim_alignment_score"]
+    feature = scored["feature_alignment"]
+    is_mismatched = (tech < 55.0 and feature < 30.0 and aim > 75.0) or (tech < 55.0 and aim > 75.0)
+    assert is_mismatched is True, "Domain mismatch guardrail condition should evaluate to True"
+    print("[PASS] Domain Mismatch Warning correctly detected for high intent / low tech match.", flush=True)
+
+
 def run_agent_pipeline_test():
     print("========================================", flush=True)
     print("TESTING 9-AGENT AI PIPELINE INTEGRATION", flush=True)
@@ -92,7 +160,16 @@ def run_agent_pipeline_test():
             "target_domains": ["MedTech / BioTech / HealthTech", "Smart Automation"],
             "backend_framework": "FastAPI",
             "frontend_framework": "React",
-            "ml_capabilities": ["PyTorch", "Scikit-Learn"]
+            "ml_capabilities": ["PyTorch", "Scikit-Learn"],
+            "capability_manifest": {
+                "capabilities": [
+                    {"name": "Biomedical Signal Processing", "evidence": ["services/eeg.py: class EEGProcessor"], "confidence": 0.95},
+                    {"name": "REST API Service Layer", "evidence": ["api/routes.py: GET /api/v1/patient"], "confidence": 0.95}
+                ],
+                "domain_signals": ["healthcare"],
+                "endpoints": [{"method": "GET", "path": "/api/v1/patient", "handler": "get_patient", "file": "api/routes.py"}],
+                "data_models": [{"model_name": "PatientRecord", "table_name": "patient_records", "columns": ["id", "eeg_data"], "file": "models.py"}]
+            }
         }
 
         mock_repo_info = {
@@ -104,8 +181,11 @@ def run_agent_pipeline_test():
         # 1. Test Intent Guard Regression
         test_intent_alignment_guard_regression()
 
-        # 2. Test Agent 4: Matching Agent with 6-Factor Intent Alignment
-        print("\n[1/5] Running Agent 4 (SIH Matching & 6-Factor Reranker)...", flush=True)
+        # 2. Test Domain Mismatch Guardrail
+        test_domain_mismatch_warning_guardrail()
+
+        # 3. Test Agent 4: Matching Agent with 6-Factor Intent Alignment
+        print("\n[1/5] Running Agent 4 (SIH Matching & Capability Manifest Reranker)...", flush=True)
         matcher = SIHMatchingAgent()
         match_res = matcher.run({
             "db": db,
@@ -113,23 +193,24 @@ def run_agent_pipeline_test():
             "analysis_data": mock_analysis_data
         })
         top_matches = match_res.get("top_matches", [])
-        assert len(top_matches) > 0, "Expected at least 1 match"
+        assert len(top_matches) >= 3, f"Expected at least 3 matches, got {len(top_matches)}"
         top = top_matches[0]
         assert "aim_alignment_score" in top, "Expected aim_alignment_score in match breakdown"
-        print(f"[OK] Top Match: {top['problem_statement_id']} - {top['title'][:40]}... Score: {top['overall_match_score']}% (Aim Intent: {top['aim_alignment_score']}%)", flush=True)
+        match_summary_strs = [f"{m['problem_statement_id']} ({m['overall_match_score']}%)" for m in top_matches[:3]]
+        print(f"[OK] Top 3 Matches returned: {', '.join(match_summary_strs)}", flush=True)
 
         target_ps_id = top["problem_statement_id"]
         ps = db.query(ProblemStatement).filter(ProblemStatement.id == target_ps_id).first()
         assert ps is not None, f"ProblemStatement {target_ps_id} not found"
 
-        # 3. Test Agent 5: Problem Analyst
+        # 4. Test Agent 5: Problem Analyst
         print("[2/5] Running Agent 5 (Problem Statement Analyst)...", flush=True)
         analyst = ProblemStatementAnalystAgent()
         problem_res = analyst.run({"problem_statement": ps})
         assert len(problem_res["explicit_requirements"]) > 0
         print(f"[OK] Decomposed into {len(problem_res['explicit_requirements'])} requirements", flush=True)
 
-        # 4. Test Agent 6: Gap Analysis Agent
+        # 5. Test Agent 6: Gap Analysis Agent
         print("[3/5] Running Agent 6 (Gap Analysis Matrix)...", flush=True)
         gap_agent = GapAnalysisAgent()
         gap_res = gap_agent.run({
@@ -140,7 +221,7 @@ def run_agent_pipeline_test():
         assert "reusability_score" in gap_res
         print(f"[OK] Requirement Matrix generated. Reusability: {gap_res['reusability_score']}%", flush=True)
 
-        # 5. Test Agent 7 & 8: Solution Architecture & Implementation Planner
+        # 6. Test Agent 7 & 8: Solution Architecture & Implementation Planner
         print("[4/5] Running Agents 7 & 8 (Solution Architecture & Phased Planner)...", flush=True)
         architect = SolutionArchitectAgent()
         arch_res = architect.run({
@@ -158,7 +239,7 @@ def run_agent_pipeline_test():
         assert len(plan_res["phases"]) >= 4
         print(f"[OK] Roadmap created with {len(plan_res['phases'])} detailed phases", flush=True)
 
-        # 6. Test Agent 9: Coding Prompt Generator
+        # 7. Test Agent 9: Coding Prompt Generator
         print("[5/5] Running Agent 9 (AI Coding Prompt Generator)...", flush=True)
         prompt_agent = PromptGeneratorAgent()
         prompt_res = prompt_agent.run({
@@ -172,7 +253,7 @@ def run_agent_pipeline_test():
         print(f"[OK] Generated {len(prompts)} modular AI prompts ready for Cursor/Claude Code/Antigravity", flush=True)
 
         print("========================================", flush=True)
-        print("ALL 9 AGENTS & INTENT GUARD TESTED AND FULLY OPERATIONAL", flush=True)
+        print("ALL 9 AGENTS & CAPABILITY MANIFEST PIPELINE FULLY OPERATIONAL", flush=True)
         print("========================================", flush=True)
 
     finally:
