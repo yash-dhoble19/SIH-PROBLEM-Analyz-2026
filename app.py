@@ -54,13 +54,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Ensure static directories exist
-STATIC_DIR.mkdir(parents=True, exist_ok=True)
-(STATIC_DIR / "css").mkdir(parents=True, exist_ok=True)
-(STATIC_DIR / "js").mkdir(parents=True, exist_ok=True)
+# Mount static files safely if directory exists
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Mount static files
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Register API routers
 app.include_router(problems_router)

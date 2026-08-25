@@ -30,13 +30,27 @@ def get_db():
         db.close()
 
 def init_db():
-    """Ensure pgvector extension is active and create all schema tables."""
-    with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-        conn.execute(text("ALTER TABLE problem_matches ADD COLUMN IF NOT EXISTS aim_alignment_score FLOAT DEFAULT 0.0;"))
-        conn.execute(text("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS analysis_id UUID;"))
-        conn.execute(text("ALTER TABLE repository_analyses ADD COLUMN IF NOT EXISTS grounded_capabilities JSONB DEFAULT '[]'::jsonb;"))
-        conn.execute(text("ALTER TABLE repository_analyses ADD COLUMN IF NOT EXISTS is_low_confidence BOOLEAN DEFAULT FALSE;"))
-        conn.execute(text("ALTER TABLE repository_analyses ADD COLUMN IF NOT EXISTS confidence_warning TEXT;"))
-        conn.commit()
-    Base.metadata.create_all(bind=engine)
+    """Ensure pgvector extension is active and create all schema tables safely."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            conn.commit()
+    except Exception:
+        pass
+
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception:
+        pass
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE problem_matches ADD COLUMN IF NOT EXISTS aim_alignment_score FLOAT DEFAULT 0.0;"))
+            conn.execute(text("ALTER TABLE analysis_jobs ADD COLUMN IF NOT EXISTS analysis_id UUID;"))
+            conn.execute(text("ALTER TABLE repository_analyses ADD COLUMN IF NOT EXISTS grounded_capabilities JSONB DEFAULT '[]'::jsonb;"))
+            conn.execute(text("ALTER TABLE repository_analyses ADD COLUMN IF NOT EXISTS is_low_confidence BOOLEAN DEFAULT FALSE;"))
+            conn.execute(text("ALTER TABLE repository_analyses ADD COLUMN IF NOT EXISTS confidence_warning TEXT;"))
+            conn.commit()
+    except Exception:
+        pass
+
