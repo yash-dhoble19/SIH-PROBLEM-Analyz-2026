@@ -6,12 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from platform_core.database.connection import get_db
 from platform_core.database.models import ProblemStatement, Repository, RepositoryAnalysis, AgentRun
-from scraper.scraper import SIHScraper
 
 router = APIRouter(prefix="/api/admin", tags=["Admin & System"])
 
 
 def _run_scraper_job():
+    # Lazy import: scraper uses SQLite + local file I/O that crashes on
+    # Vercel's read-only /var/task filesystem. Only import when actually called.
+    from scraper.scraper import SIHScraper
     scraper = SIHScraper()
     scraper.run(output_format="all")
 

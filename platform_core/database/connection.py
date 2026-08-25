@@ -5,18 +5,31 @@ Database connection, session management, and engine initialization for Neon Post
 import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 from platform_core.config import settings
 
-# Create engine with connection pooling and SSL enabled
-engine = create_engine(
-    settings.DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
-    pool_recycle=300,
-    pool_pre_ping=True,
-    connect_args={"connect_timeout": 15},
-    echo=False
-)
+# Serverless runtimes (Vercel) must not hold persistent connection pools.
+# Use NullPool when running on Vercel so each request opens/closes its own
+# connection.  For local development, keep a small traditional pool.
+_is_serverless = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
+if _is_serverless:
+    engine = create_engine(
+        settings.DATABASE_URL,
+        poolclass=NullPool,
+        connect_args={"connect_timeout": 10},
+        echo=False
+    )
+else:
+    engine = create_engine(
+        settings.DATABASE_URL,
+        pool_size=5,
+        max_overflow=10,
+        pool_recycle=300,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 15},
+        echo=False
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
