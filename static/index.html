@@ -50,14 +50,23 @@
             </div>
 
             <div class="header-actions">
-                <div class="db-status-pill">
-                    <span class="status-dot"></span> Live Neon PostgreSQL
+                <div class="visitor-counter-pill" id="visitor-stats-pill" title="Live Platform Usage & Community Rating">
+                    <span class="pulse-dot"></span>
+                    <span id="user-count-display">👥 140+ Users</span>
+                    <span style="color: rgba(255,255,255,0.2);">|</span>
+                    <span id="platform-rating-display" onclick="App.openRatingModal('platform', 'general')" style="cursor: pointer; color: #fbbf24; font-weight: 700;">⭐ 4.9 (18)</span>
                 </div>
+                <div class="db-status-pill">
+                    <span class="status-dot"></span>
+                </div>
+                <button class="action-btn rate-btn" onclick="App.openRatingModal('platform', 'general')">
+                    <span class="btn-icon">⭐</span> Rate Us
+                </button>
                 <button class="action-btn" onclick="App.exportJSON()">
-                    <span class="btn-icon">📥</span> Export JSON
+                    <span class="btn-icon">📥</span> JSON
                 </button>
                 <button class="action-btn" onclick="App.exportCSV()">
-                    <span class="btn-icon">📊</span> Export CSV
+                    <span class="btn-icon">📊</span> CSV
                 </button>
             </div>
         </div>
@@ -162,15 +171,15 @@
                     <div class="workflow-card">
                         <div class="step-badge-num">3</div>
                         <div class="workflow-icon">🎯</div>
-                        <h3>pgvector Staged Matching</h3>
-                        <p>High-dimensional vector cosine search across Neon PostgreSQL retrieves and reranks the top SIH problem statements with score breakdowns.</p>
+                        <h3>Smart Candidate Matching</h3>
+                        <p>Searches across 200+ SIH problem statements to retrieve and rerank the closest matches with score breakdowns.</p>
                     </div>
 
                     <div class="workflow-card">
                         <div class="step-badge-num">4</div>
                         <div class="workflow-icon">⚡</div>
                         <h3>Gap Matrix &amp; AI Prompts</h3>
-                        <p>Receive an exhaustive requirement comparison matrix, a 5-phase step-by-step roadmap, and copy-ready prompts for Cursor, Claude Code, and Antigravity.</p>
+                        <p>Receive an exhaustive requirement comparison matrix, a 5-phase step-by-step roadmap, and copy-ready prompts for your favorite AI coding assistant.</p>
                     </div>
                 </div>
 
@@ -411,6 +420,9 @@
                 <button class="btn-outline-copy" onclick="App.copyCurrentPSID()">
                     📋 Copy PS ID
                 </button>
+                <button class="btn-outline-copy" onclick="App.openProblemRatingModal()" style="border-color: rgba(234, 179, 8, 0.4); color: #facc15;">
+                    ⭐ Rate This Problem
+                </button>
                 <div class="action-right-group">
                     <button class="btn-outline-copy" onclick="App.analyzeFromModal()">
                         ⚡ Match My Project
@@ -423,10 +435,92 @@
         </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════ -->
+    <!-- RATING & FEEDBACK MODAL                     -->
+    <!-- ═══════════════════════════════════════════ -->
+    <div id="modal-rating" class="modal-backdrop" style="display: none;">
+        <div class="modal-window rating-modal-window" style="max-width: 600px;">
+            <div class="modal-top-bar">
+                <div class="modal-heading-group">
+                    <span class="ps-category-pill pill-software">COMMUNITY FEEDBACK</span>
+                    <h2 class="modal-ps-title" id="rating-modal-title">⭐ Rate Platform &amp; Project Intelligence</h2>
+                </div>
+                <button class="modal-close-btn" onclick="App.closeRatingModal()">✕</button>
+            </div>
+
+            <div class="modal-body-scroll" style="padding: 1.5rem;">
+                <div class="rating-form-box">
+                    <p style="font-size: 0.85rem; color: var(--text-secondary);" id="rating-modal-subtitle">Help us improve the SIH 2026 Intelligence Platform. Share your rating and feedback on problem accuracy, AI suggestions, or prompt quality.</p>
+                    
+                    <div>
+                        <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Your Rating (1 to 5 Stars)</label>
+                        <div class="star-rating-picker" id="star-picker">
+                            <button type="button" class="star-btn" data-val="1" onclick="App.setRatingValue(1)">★</button>
+                            <button type="button" class="star-btn" data-val="2" onclick="App.setRatingValue(2)">★</button>
+                            <button type="button" class="star-btn" data-val="3" onclick="App.setRatingValue(3)">★</button>
+                            <button type="button" class="star-btn" data-val="4" onclick="App.setRatingValue(4)">★</button>
+                            <button type="button" class="star-btn active" data-val="5" onclick="App.setRatingValue(5)">★</button>
+                            <span class="rating-score-label" id="rating-score-num">5.0 / 5.0</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Feedback Category</label>
+                        <div class="feedback-tag-group" id="rating-category-tags" style="margin-top: 6px;">
+                            <button type="button" class="feedback-tag-btn active" onclick="App.setRatingCategory(this, 'Overall Experience')">🌟 Overall</button>
+                            <button type="button" class="feedback-tag-btn" onclick="App.setRatingCategory(this, 'Matching Accuracy')">🎯 Accuracy</button>
+                            <button type="button" class="feedback-tag-btn" onclick="App.setRatingCategory(this, 'Coding Prompts')">💻 Prompts</button>
+                            <button type="button" class="feedback-tag-btn" onclick="App.setRatingCategory(this, 'Gap Analysis')">📊 Roadmap</button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Your Name / Handle (Optional)</label>
+                        <input type="text" class="rating-input" id="rating-author" placeholder="e.g. Alex (SIH Team Lead)" style="margin-top: 6px;">
+                    </div>
+
+                    <div>
+                        <label style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Your Review &amp; Feedback</label>
+                        <textarea class="rating-input rating-textarea" id="rating-comments" placeholder="What worked well? What could we improve?" style="margin-top: 6px;"></textarea>
+                    </div>
+
+                    <button class="btn-glow-purple-lg" style="width: 100%; justify-content: center;" onclick="App.submitUserRating()">
+                        🚀 Submit Rating &amp; Feedback
+                    </button>
+                </div>
+
+                <!-- Recent Community Reviews Section -->
+                <div style="margin-top: 1.5rem; border-top: 1px solid var(--border-subtle); padding-top: 1rem;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                        <span style="font-size: 0.85rem; font-weight: 700; color: var(--text-primary);">💬 Recent Community Feedback</span>
+                        <span id="rating-modal-avg-badge" style="font-size: 0.75rem; color: #fbbf24; font-weight: 700;">⭐ 4.9 (18 reviews)</span>
+                    </div>
+                    <div class="reviews-stream" id="rating-reviews-stream">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Rate Trigger Button -->
+    <div class="floating-rate-pill" onclick="App.openRatingModal('platform', 'general')" title="Rate Platform &amp; Feedback">
+        <span>⭐ Rate Platform</span>
+    </div>
+
+
     <footer class="app-footer">
         <div class="footer-container">
             <p>SIH 2026 Intelligence Hub &mdash; Powered by Neon PostgreSQL + pgvector + 9-Agent AI Engine</p>
             <p>Source Data: <a href="https://www.sih.gov.in/sih2026PS" target="_blank" rel="noopener">sih.gov.in/sih2026PS</a></p>
+<p class="footer-credit">Developed by Yash Dhoble
+    <a href="https://github.com/yash-dhoble19" target="_blank" rel="noopener noreferrer">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.307 8.207 11.387.599.111.793-.261.793-.577v2.234c-3.192.654-4.868-1.454-4.868-4.615 0-3.252 4.062-4.614 4.868-4.614 4.786 0 7.659 3.384 9.322 4.564.661.159.85.318.85.518v2.188c-1.309.303-2.563.582-3.717.775C20.533 21.851 24 18.506 24 15.086a12 12 0 0 1-12-12zM12 2.149c-6.627 0-12 5.373-12 12 0 2.368.93 4.53 2.573 5.688-.673.108-.797-.245-.797-.575 0-2.018 1.565-3.633 3.606-3.633s3.606 1.615 3.606 3.633c0 .332-.027.655-.04.987 2.688.887 4.597 3.138 4.597 6.366 0 3.23-1.814 5.337-4.596 6.287.439.097.808.16 1.208.16.866 0 1.423-.507 1.423-1.318v-2.326c-2.448 1.332-4.772 2.358-6.899 2.85-.514.137-.884.333-.884.68 0 1.848 1.602 3.308 3.572 3.374-.066.108-.15.184-.223.237.649-.388 1.285-1.06 1.285-2.026 0-1.168-.44-1.997-1.284-2.337 1.556-.687 2.284-2.23 3.097-4.217-.613.216-1.285.408-1.97.591C12 21.851 12 22 12 22s-5.373 0-12-5.373 5.373-12 12-12z"/></svg>
+    </a>
+    <a href="https://www.linkedin.com/in/yash-dhoble-404ba6237" target="_blank" rel="noopener noreferrer">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 6.699c-.757-2.394-2.887-3.907-5.324-3.907-1.512 0-2.895.602-3.878 1.718a9.38 9.38 0 0 0-2.635.996c-.636 0-1.133-.148-1.587-.42a9.35 9.35 0 0 0-2.39-.936A11.034 11.034 0 0 0 2.26 6.618c-.178-.52-.267-.94-.267-1.539 0-1.018.433-1.776 1.287-2.367a6.353 6.353 0 0 1 1.871-1.244c.832 0 1.553.12 2.188.354.586-.022.966-.163 1.336-.368a7.368 7.368 0 0 1 1.783-.719 7.392 7.392 0 0 1 1.306.318 7.356 7.356 0 0 1 .361 1.818 7.371 7.371 0 0 0 1.153 2.158c.377-.028.649-.113.853-.26a6.335 6.335 0 0 1 .713-.37c.309-.341.589-.697.826-1.026C7.79 3.096 5.355 1.658 2.628.138a.612.612 0 0 0-.563 0 .612.612 0 0 0-.093.418 7.272 7.272 0 0 0-.538 2.298 7.296 7.296 0 0 0 .89 3.638 7.308 7.308 0 0 1 1.818.608A9.299 9.299 0 0 1 1.05 11.477c.02.557.118.99.267 1.335a9.325 9.325 0 0 0 1.53 1.696c-.172.078-.338.13-.53.139-.611.067-1.153.273-1.61.62a9.765 9.765 0 0 0-.482 1.887c.046.908.227 1.64.492 2.189a9.017 9.017 0 0 1 .823 1.538 9.043 9.043 0 0 0 1.855.592 9.08 9.08 0 0 1 .681.287c.287.009.538.014.753.014s.466 0 .753-.014a9.066 9.066 0 0 0 1.855-.592 9.094 9.094 0 0 1 .681-.287c.286-.009.533-.014.753-.014.318 0 .657-.05.896-.153.3.058.53.25.738.569.218.328.367.669.418.933.051.263.08.543.08.819s-.057.556-.142.819c-.17.332-.43.565-.81.606a13.035 13.035 0 0 1-.908.277 13.059 13.059 0 0 1-.82-.033 13.031 13.031 0 0 1-.73-.398 13.036 13.036 0 0 1-.579-.857c-.127-.178-.178-.383-.178-.608s-.051-.43.178-.608c.09-.266.25-.55.468-.78.228-.23.386-.496.488-.78a11.947 11.947 0 0 1 .333-1.245c.018-.308.08-.528.157-.769a10.641 10.641 0 0 1 .595-1.05c.127-.128.232-.246.328-.354.218-.25.398-.52.538-.8.11-.239.15-.44.178-.632.052-.317.067-.678.067-1.075s-.016-.758-.068-1.135a9.148 9.148 0 0 0-.536-1.341c-.165-.23-.324-.408-.538-.527a9.239 9.239 0 0 0-.735-.177 9.269 9.269 0 0 0-.351.118c-.152.126-.273.284-.35.463a6.888 6.888 0 0 1-.48.558 6.904 6.904 0 0 1-.582.297 6.889 6.889 0 0 1-.596.1a6.894 6.894 0 0 1-.532 0 6.887 6.887 0 0 1-.586-.297 6.884 6.884 0 0 1-.386-.613c-.067-.236-.083-.473-.083-.735s.017-1.027-.083-1.575a11.224 11.224 0 0 1 .228-2.06 11.235 11.235 0 0 1 .816-1.041c.277.01.577.03.81.05.547.036.987.117 1.36.312.706.327 1.28.81 1.656 1.532.553.966.766 1.83.91 2.722.23 1.208.337 2.538.416 3.66.123 1.53.09 3.207.017 4.515z"/></svg>
+    </a>
+</p>
         </div>
     </footer>
 

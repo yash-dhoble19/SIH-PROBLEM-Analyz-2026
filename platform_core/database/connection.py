@@ -14,6 +14,7 @@ engine = create_engine(
     max_overflow=20,
     pool_recycle=300,
     pool_pre_ping=True,
+    connect_args={"connect_timeout": 15},
     echo=False
 )
 

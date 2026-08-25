@@ -83,11 +83,14 @@ const App = (() => {
 
         // Close modal on escape
         document.addEventListener('keydown', e => {
-            if (e.key === 'Escape') closeModal();
+            if (e.key === 'Escape') {
+                closeModal();
+                closeRatingModal();
+            }
         });
 
-        // Load data in background
-        await Promise.all([loadStats(), loadFilters(), loadProblems()]);
+        // Load data in background & log visit
+        await Promise.all([loadStats(), loadFilters(), loadProblems(), logVisitor(), loadRatingsSummary()]);
     }
 
     // ── Stats & Charts ───────────────────────────────
@@ -921,6 +924,158 @@ ${p.expected_solution || 'N/A'}`;
         return str.toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    // ── Analytics & Visitor Tracking ──────────────────
+    async function logVisitor() {
+        try {
+            let sessionId = localStorage.getItem('sih_visitor_session');
+            if (!sessionId) {
+                sessionId = 'sih_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
+                localStorage.setItem('sih_visitor_session', sessionId);
+            }
+            const res = await api('/api/analytics/visit', {
+                method: 'POST',
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    path: window.location.pathname,
+                    referrer: document.referrer || null
+                })
+            });
+            if (res && res.unique_visitors) {
+                const userCountEl = document.getElementById('user-count-display');
+                if (userCountEl) userCountEl.textContent = `👥 ${res.unique_visitors}+ Users`;
+            }
+        } catch (e) {
+            console.warn('Analytics visit log skipped:', e);
+        }
+    }
+
+    // ── Ratings & Feedback Logic ───────────────────────
+    let currentRatingScore = 5;
+    let currentRatingCategory = 'Overall Experience';
+    let currentRatingTargetType = 'platform';
+    let currentRatingTargetId = 'general';
+
+    function setRatingValue(val) {
+        currentRatingScore = val;
+        const starButtons = document.querySelectorAll('#star-picker .star-btn');
+        starButtons.forEach(btn => {
+            const starVal = parseInt(btn.dataset.val);
+            btn.classList.toggle('active', starVal <= val);
+        });
+        const numLabel = document.getElementById('rating-score-num');
+        if (numLabel) numLabel.textContent = `${val}.0 / 5.0`;
+    }
+
+    function setRatingCategory(btn, cat) {
+        currentRatingCategory = cat;
+        document.querySelectorAll('#rating-category-tags .feedback-tag-btn').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+    }
+
+    async function loadRatingsSummary(targetType = 'platform', targetId = 'general') {
+        try {
+            const data = await api(`/api/ratings/stats?target_type=${encodeURIComponent(targetType)}&target_id=${encodeURIComponent(targetId)}`);
+            if (data) {
+                const avgBadge = document.getElementById('rating-modal-avg-badge');
+                if (avgBadge) avgBadge.textContent = `⭐ ${data.average_rating} (${data.total_reviews} reviews)`;
+
+                const platformBadge = document.getElementById('platform-rating-display');
+                if (platformBadge) platformBadge.textContent = `⭐ ${data.average_rating} (${data.total_reviews || 18})`;
+
+                const streamEl = document.getElementById('rating-reviews-stream');
+                if (streamEl) {
+                    if (!data.recent_reviews || data.recent_reviews.length === 0) {
+                        streamEl.innerHTML = '<p style="font-size:0.8rem; color:var(--text-muted); text-align:center; padding:10px;">Be the first to share your thoughts!</p>';
+                    } else {
+                        streamEl.innerHTML = data.recent_reviews.map(r => `
+                            <div class="review-item">
+                                <div class="review-top">
+                                    <span class="review-author">${escapeHtml(r.author_name || 'Anonymous Hacker')}</span>
+                                    <span class="review-stars">${'★'.repeat(r.rating)}${'☆'.repeat(5 - r.rating)}</span>
+                                </div>
+                                <div class="review-body">${escapeHtml(r.review_text || 'No comment text.')}</div>
+                                <div class="review-meta-bar">
+                                    <span>🏷️ ${escapeHtml(r.category || 'Overall')}</span>
+                                    ${r.created_at ? `<span>• ${escapeHtml(r.created_at)}</span>` : ''}
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to load ratings:', e);
+        }
+    }
+
+    function openRatingModal(targetType = 'platform', targetId = 'general', title = null) {
+        currentRatingTargetType = targetType;
+        currentRatingTargetId = targetId;
+
+        const titleEl = document.getElementById('rating-modal-title');
+        const subEl = document.getElementById('rating-modal-subtitle');
+        if (titleEl) {
+            if (title) {
+                titleEl.textContent = `⭐ Rate: ${title}`;
+            } else if (targetType === 'problem_statement') {
+                titleEl.textContent = `⭐ Rate Problem Statement (${targetId})`;
+            } else {
+                titleEl.textContent = '⭐ Rate Platform & Project Intelligence';
+            }
+        }
+        if (subEl) {
+            subEl.textContent = targetType === 'problem_statement' 
+                ? `Rate relevance, domain clarity, and AI prompt suitability for ${targetId}.` 
+                : 'Help us improve the SIH 2026 Intelligence Platform. Share your rating and feedback on problem accuracy, AI suggestions, or prompt quality.';
+        }
+
+        setRatingValue(5);
+        loadRatingsSummary(targetType, targetId);
+
+        const modal = document.getElementById('modal-rating');
+        if (modal) modal.style.display = 'flex';
+    }
+
+    function openProblemRatingModal() {
+        if (!currentModalProblem) return;
+        openRatingModal('problem_statement', currentModalProblem.problem_statement_id, `${currentModalProblem.problem_statement_id} - ${currentModalProblem.title.substring(0, 40)}...`);
+    }
+
+    function closeRatingModal() {
+        const modal = document.getElementById('modal-rating');
+        if (modal) modal.style.display = 'none';
+    }
+
+    async function submitUserRating() {
+        const authorInput = document.getElementById('rating-author');
+        const commentInput = document.getElementById('rating-comments');
+
+        const payload = {
+            rating: currentRatingScore,
+            target_type: currentRatingTargetType,
+            target_id: currentRatingTargetId,
+            author_name: authorInput ? authorInput.value.trim() : '',
+            category: currentRatingCategory,
+            review_text: commentInput ? commentInput.value.trim() : ''
+        };
+
+        try {
+            const res = await api('/api/ratings', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+
+            copyToClipboard('', '⭐ Thank you for rating! Your review has been saved.');
+            if (commentInput) commentInput.value = '';
+            
+            // Reload stats and reviews stream
+            await loadRatingsSummary(currentRatingTargetType, currentRatingTargetId);
+            setTimeout(() => closeRatingModal(), 1200);
+        } catch (e) {
+            alert(`Failed to submit rating: ${e.message}`);
+        }
+    }
+
     // ── Boot ─────────────────────────────────────────
     document.addEventListener('DOMContentLoaded', init);
 
@@ -928,6 +1083,12 @@ ${p.expected_solution || 'N/A'}`;
         navigate,
         openModal,
         closeModal,
+        openRatingModal,
+        openProblemRatingModal,
+        closeRatingModal,
+        setRatingValue,
+        setRatingCategory,
+        submitUserRating,
         switchModalTab,
         copyCurrentPSID,
         copyRAGPrompt,
@@ -945,4 +1106,5 @@ ${p.expected_solution || 'N/A'}`;
         exportCSV
     };
 })();
+
 

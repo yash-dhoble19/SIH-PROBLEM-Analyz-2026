@@ -301,3 +301,29 @@ class Bookmark(Base):
 
     user = relationship("User", back_populates="bookmarks")
     problem_statement = relationship("ProblemStatement", back_populates="bookmarks")
+
+
+class VisitorLog(Base):
+    __tablename__ = "visitor_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(String(100), nullable=False, index=True)
+    ip_hash = Column(String(64), nullable=True, index=True)
+    user_agent = Column(String(500), nullable=True)
+    path = Column(String(255), default="/")
+    referrer = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ProjectRating(Base):
+    __tablename__ = "project_ratings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    target_type = Column(String(50), default="platform", index=True)  # 'platform', 'problem_statement', 'project_analysis'
+    target_id = Column(String(100), default="general", index=True)    # 'general', 'SIH26001', etc.
+    rating = Column(Integer, nullable=False)                         # 1 to 5
+    author_name = Column(String(100), default="Anonymous")
+    category = Column(String(100), default="Overall Experience")    # 'Overall Experience', 'Problem Accuracy', 'Prompt Quality', 'Analysis Depth'
+    review_text = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, index=True)
+

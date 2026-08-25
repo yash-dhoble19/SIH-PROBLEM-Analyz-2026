@@ -99,6 +99,29 @@ def test_html_home():
     assert res.status_code == 200
     assert "SIH 2026 Intelligence Hub" in res.text
 
+def test_visitor_analytics_and_ratings():
+    # Test visit log
+    res_visit = client.post("/api/analytics/visit", json={"session_id": "test_direct_run", "path": "/"})
+    assert res_visit.status_code == 200
+    # Test analytics stats
+    res_stats = client.get("/api/analytics/stats")
+    assert res_stats.status_code == 200
+    assert "unique_visitors" in res_stats.json()
+    # Test rating submission
+    res_rate = client.post("/api/ratings", json={
+        "rating": 5,
+        "target_type": "platform",
+        "target_id": "general",
+        "author_name": "Direct Test Runner",
+        "category": "Overall Experience",
+        "review_text": "Production ready!"
+    })
+    assert res_rate.status_code == 200
+    # Test ratings summary
+    res_rate_summary = client.get("/api/ratings/stats")
+    assert res_rate_summary.status_code == 200
+    assert res_rate_summary.json()["total_reviews"] >= 1
+
 if __name__ == "__main__":
     print("========================================", flush=True)
     print("RUNNING SIH INTELLIGENCE PLATFORM TESTS", flush=True)
@@ -112,8 +135,10 @@ if __name__ == "__main__":
     run_test("Secret Token & Key Sanitization", test_secret_sanitization)
     run_test("384-Dim Vector Embeddings", test_embeddings)
     run_test("HTML Dashboard Serving", test_html_home)
+    run_test("Visitor Analytics & Rating System", test_visitor_analytics_and_ratings)
     print("========================================", flush=True)
     print(f"RESULTS: {tests_passed} PASSED, {tests_failed} FAILED", flush=True)
     print("========================================", flush=True)
     if tests_failed > 0:
         sys.exit(1)
+

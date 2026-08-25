@@ -194,17 +194,27 @@ Copy the example environment file and configure your settings:
 cp .env.example .env
 ```
 
-Edit `.env` (optional API keys for online LLM providers; offline heuristic engines are built-in):
+Edit `.env` (optional API keys for online LLM providers; offline engines are built-in):
 ```ini
 DATABASE_URL=postgresql://neondb_owner:password@ep-sample.us-east-2.aws.neon.tech/neondb?sslmode=require
 AI_PROVIDER=auto
 EMBEDDING_PROVIDER=auto
+LOCAL_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GOOGLE_API_KEY=
 GITHUB_TOKEN=
 PORT=8000
 HOST=127.0.0.1
+```
+
+`EMBEDDING_PROVIDER=auto` uses the local MiniLM sentence-transformer and never
+contacts OpenAI or Google. Set it explicitly to `openai` or `google` only when
+you have configured that provider's key. After changing embedding backends,
+regenerate persisted problem-statement vectors once:
+
+```bash
+python scripts/rebuild_embeddings.py
 ```
 
 ---

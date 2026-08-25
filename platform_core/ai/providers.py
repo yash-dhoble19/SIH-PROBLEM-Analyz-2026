@@ -91,16 +91,21 @@ class GroqProvider(AIProvider):
     Includes retry-with-backoff on 429 rate-limit responses.
     """
 
-    MAX_RETRIES = 3
-    BACKOFF_BASE_SECONDS = 2.0
+    # Bound a degraded Groq stage instead of allowing the SDK's multi-minute
+    # default request timeout to dominate a repository-matching run.
+    MAX_RETRIES = 2
+    BACKOFF_BASE_SECONDS = 1.0
+    REQUEST_TIMEOUT_SECONDS = 15.0
 
     def __init__(self, api_key: str):
         import openai
         self.client = openai.OpenAI(
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1"
+            base_url="https://api.groq.com/openai/v1",
+            timeout=self.REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,
         )
-        self.model = "openai/gpt-oss-120b"
+        self.model = "openai/gpt-oss-20b"
 
     def _call_with_retry(self, messages: list, temperature: float = 0.2, response_format: Optional[dict] = None) -> str:
         """Execute an API call with exponential backoff on 429 rate-limit errors."""
@@ -142,16 +147,31 @@ class GroqProvider(AIProvider):
         return self._call_with_retry(messages, temperature=0.2)
 
     def generate_json(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
-        sys_content = (system_prompt or "") + "\nRespond ONLY with valid JSON. No markdown, no code fences, no explanation outside the JSON."
+        import openai as openai_module
+
+        sys_content = (system_prompt or "") + "\nYou MUST respond with valid raw JSON only. Do NOT include markdown code fences, markdown formatting, or any extra text before or after the JSON."
         messages = [
             {"role": "system", "content": sys_content},
             {"role": "user", "content": prompt}
         ]
-        text = self._call_with_retry(messages, temperature=0.15, response_format={"type": "json_object"})
+        try:
+            text = self._call_with_retry(messages, temperature=0.15, response_format={"type": "json_object"})
+        except openai_module.BadRequestError:
+            # Only retry without JSON mode when the endpoint rejects that
+            # option. Network failures and rate limits have already received
+            # their bounded retry budget and must not be replayed a second time.
+            text = self._call_with_retry(messages, temperature=0.15)
         text = text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except Exception:
+            import re
+            m = re.search(r'(\{.*\})', text, re.DOTALL)
+            if m:
+                return json.loads(m.group(1))
+            raise
 
 
 class HeuristicAIProvider(AIProvider):

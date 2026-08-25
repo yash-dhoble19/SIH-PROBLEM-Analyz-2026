@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Set, Optional
 from sqlalchemy.orm import Session
@@ -24,6 +25,8 @@ class SIHMatchingAgent(BaseAgent):
     def __init__(self, ai_provider=None):
         super().__init__("Agent 4: SIH Matching Agent", ai_provider)
         self.embedder = EmbeddingProvider()
+        self._last_triage_timing: Dict[str, Any] = {}
+        self._last_intent_timing: Dict[str, Any] = {}
 
     def assess_intent_alignment(self, repo_profile: Dict[str, Any], problem_statement: Any) -> Dict[str, Any]:
         """
@@ -45,7 +48,7 @@ class SIHMatchingAgent(BaseAgent):
 
         # Fast Pre-filter: Check deterministic domain compatibility first
         heuristic_res = self._heuristic_intent_assessment(repo_profile, ps_id, ps_title, ps_theme, ps_desc, ps_sol, ps_bg)
-        if not heuristic_res.get("domain_match", True) or heuristic_res.get("aim_alignment_score", 0) >= 80:
+        if not heuristic_res.get("domain_match", True) or heuristic_res.get("aim_alignment_score", 0) >= 88.0:
             return heuristic_res
 
         # Try LLM Provider for ambiguous edge cases
@@ -158,6 +161,11 @@ Respond ONLY with a valid JSON object:
                 "label": "Agriculture & Smart Farming",
                 "themes": ["agriculture, foodtech & rural development", "agriculture"]
             },
+            "land_records_governance": {
+                "keywords": ["land record", "cadastral", "deed", "patta", "revenue department", "property record", "land registry", "khasra", "mutation", "survey map", "digitization and validation of land"],
+                "label": "Land Records & Revenue Governance",
+                "themes": ["smart automation", "miscellaneous"]
+            },
             "legal_judiciary": {
                 "keywords": ["legal", "court", "law", "case file", "bail", "judge", "justice", "advocate", "litigation", "statute", "tribunal", "police fir"],
                 "label": "Legal Tech & Judicial Governance",
@@ -191,7 +199,7 @@ Respond ONLY with a valid JSON object:
         common_words = repo_words.intersection(ps_words)
         jaccard = len(common_words) / max(1, len(repo_words.union(ps_words)))
 
-        # Direct cluster alignment
+        # 1. Direct cluster alignment (both repo and PS belong to the exact same domain cluster)
         if top_repo_cluster and top_ps_cluster and top_repo_cluster == top_ps_cluster:
             matched_label = domain_clusters[top_repo_cluster]["label"]
             score = round(78.0 + min(20.0, jaccard * 150 + (ps_cluster_scores[top_ps_cluster] * 2)), 1)
@@ -202,18 +210,7 @@ Respond ONLY with a valid JSON object:
                 "reasoning": f"Strong intent alignment: Both the codebase and the problem statement focus directly on '{matched_label}' ({score:.1f}% intent score)."
             }
 
-        # Check theme compatibility
-        theme_matched = any(d in ps_theme_lower or ps_theme_lower in d for d in target_domains)
-        if theme_matched:
-            score = round(70.0 + min(25.0, jaccard * 180 + len(common_words)), 1)
-            return {
-                "solves_same_core_problem": True,
-                "aim_alignment_score": score,
-                "domain_match": True,
-                "reasoning": f"Domain theme '{ps_theme}' aligns with project target domains ({score:.1f}% aim score, {len(common_words)} shared domain terms)."
-            }
-
-        # Hard Incompatibility Veto for disjoint clusters
+        # 2. Hard Incompatibility Veto for disjoint domain clusters (overrides superficial theme tag mismatches)
         if top_repo_cluster and top_ps_cluster and top_repo_cluster != top_ps_cluster:
             repo_score = repo_cluster_scores.get(top_repo_cluster, 0)
             ps_score = ps_cluster_scores.get(top_ps_cluster, 0)
@@ -228,13 +225,30 @@ Respond ONLY with a valid JSON object:
                     "reasoning": f"Intent mismatch: The repository is dedicated to '{repo_label}', whereas the SIH problem statement requires solutions for '{ps_label}' ({veto_score:.1f}% aim score)."
                 }
 
-        # Continuous generic compatibility score
-        generic_score = round(40.0 + min(35.0, jaccard * 200 + len(common_words) * 2), 1)
+        # 3. Check specific domain theme compatibility (exclude generic bucket themes like 'Smart Automation' or 'Miscellaneous')
+        generic_themes = {"smart automation", "miscellaneous", "software", "general", "other"}
+        specific_target_domains = [d for d in target_domains if d not in generic_themes]
+        
+        theme_matched = (
+            ps_theme_lower not in generic_themes and 
+            any(d in ps_theme_lower or ps_theme_lower in d for d in specific_target_domains)
+        )
+        if theme_matched:
+            score = round(70.0 + min(25.0, jaccard * 180 + len(common_words)), 1)
+            return {
+                "solves_same_core_problem": True,
+                "aim_alignment_score": score,
+                "domain_match": True,
+                "reasoning": f"Domain theme '{ps_theme}' aligns with project target domains ({score:.1f}% aim score, {len(common_words)} shared domain terms)."
+            }
+
+        # 4. Continuous neutral compatibility score for generic or unclassified themes (requires LLM assessment)
+        generic_score = round(35.0 + min(25.0, jaccard * 200 + len(common_words) * 2), 1)
         return {
-            "solves_same_core_problem": True,
+            "solves_same_core_problem": False if top_repo_cluster else True,
             "aim_alignment_score": generic_score,
-            "domain_match": True,
-            "reasoning": f"Cross-domain functional compatibility observed with '{ps_theme}' ({generic_score:.1f}% aim alignment)."
+            "domain_match": False if (top_repo_cluster and generic_score < 40.0) else True,
+            "reasoning": f"Cross-domain functional compatibility under generic theme '{ps_theme}' ({generic_score:.1f}% aim alignment; requires AI purpose verification)."
         }
 
     def _groq_full_corpus_triage(
@@ -248,6 +262,12 @@ Respond ONLY with a valid JSON object:
         Uses Groq LLM (or Heuristic provider if offline) to shortlist problem statement IDs
         that are plausibly related in real-world purpose to the project's Capability Manifest.
         """
+        stage_started = time.perf_counter()
+        telemetry: Dict[str, Any] = {
+            "backend": "heuristic" if not self.ai_provider or isinstance(self.ai_provider, HeuristicAIProvider) else type(self.ai_provider).__name__,
+            "batches": 0,
+            "batch_durations_ms": [],
+        }
         try:
             all_ps = db.query(
                 ProblemStatement.id,
@@ -258,13 +278,16 @@ Respond ONLY with a valid JSON object:
             ).all()
         except Exception as e:
             logger.warning(f"Failed to query full problem statement corpus for triage: {e}")
+            telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            self._last_triage_timing = telemetry
             return []
 
         if not all_ps:
+            telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            self._last_triage_timing = telemetry
             return []
 
-        # If provider is purely heuristic, use domain signal filtering directly
-        if not self.ai_provider or isinstance(self.ai_provider, HeuristicAIProvider):
+        def _heuristic_triage() -> List[str]:
             target_domains = [d.lower() for d in repo_profile.get("target_domains", [])]
             domain_signals = [s.lower() for s in (manifest.get("domain_signals") or repo_profile.get("domain_signals") or [])]
             
@@ -283,47 +306,59 @@ Respond ONLY with a valid JSON object:
                     shortlisted.append(ps.id)
             return shortlisted
 
-        # Build compact items for batching
+        # If provider is purely heuristic, use domain signal filtering directly
+        if not self.ai_provider or isinstance(self.ai_provider, HeuristicAIProvider):
+            shortlisted = _heuristic_triage()
+            telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            telemetry["shortlisted_candidates"] = len(shortlisted)
+            self._last_triage_timing = telemetry
+            return shortlisted
+
+        # First reduce the remote workload with the local domain gate. The
+        # semantic pgvector search below still contributes its global top-25,
+        # so this preserves recall without sending the full 226-item corpus to
+        # Groq on every run.
+        heuristic_ids = set(_heuristic_triage())
+        triage_pool = [ps for ps in all_ps if ps.id in heuristic_ids] or all_ps
+        telemetry["corpus_candidates"] = len(all_ps)
+        telemetry["triage_pool_candidates"] = len(triage_pool)
+
+        # Build ultra-compact items for batching (~20 tokens per item)
         items = []
-        for ps in all_ps:
-            summary = (ps.expected_solution or ps.description or "")[:120].strip().replace("\n", " ")
+        for ps in triage_pool:
             items.append({
                 "id": ps.id,
-                "title": ps.title[:90] if ps.title else "",
-                "theme": ps.theme or "",
-                "summary": summary
+                "title": ps.title[:65] if ps.title else "",
+                "theme": ps.theme or ""
             })
 
-        batch_size = 18
+        batch_size = 28
         batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+        telemetry["batches"] = len(batches)
         
-        repo_summary = repo_profile.get("project_summary") or repo_profile.get("description") or "Software Project"
-        repo_caps = ", ".join([c["name"] for c in manifest.get("capabilities", [])[:4]]) or "Application capabilities"
-        repo_domains = ", ".join(repo_profile.get("target_domains", []))
+        repo_summary = (repo_profile.get("project_summary") or repo_profile.get("description") or "Software Project")[:150]
+        repo_caps = ", ".join([c["name"] for c in manifest.get("capabilities", [])[:3]]) or "Application capabilities"
+        repo_domains = ", ".join(repo_profile.get("target_domains", [])[:2])
 
         system_prompt = (
-            "You are an expert AI triage architect for Smart India Hackathon. "
-            "Your task is to select problem statement IDs that plausibly share the real-world domain, "
-            "purpose, or problem-scope with the repository. Be broad and inclusive during triage; "
-            "do not discard possible domain matches. Return only valid JSON with 'shortlisted_ids'."
+            "You are an AI triage architect for Smart India Hackathon. "
+            "Select problem statement IDs that plausibly match or share the real-world domain with the repository. "
+            "Be broad and inclusive. Return JSON with 'shortlisted_ids'."
         )
 
         def process_batch(batch_items: List[Dict[str, Any]]) -> List[str]:
-            prompt = f"""REPOSITORY CONTEXT:
+            batch_started = time.perf_counter()
+            prompt = f"""PROJECT:
 - Name: {repo_profile.get('repo_name', 'Repo')}
-- Stated Purpose: {repo_summary}
-- Target Domains: {repo_domains}
-- Verified Capabilities: {repo_caps}
+- Summary: {repo_summary}
+- Domains: {repo_domains}
+- Capabilities: {repo_caps}
 
-CANDIDATE PROBLEM STATEMENTS TO TRIAGE:
-{json.dumps(batch_items, indent=2)}
+CANDIDATES:
+{json.dumps(batch_items)}
 
-TASK:
-Review the candidates above. Return all candidate IDs that plausibly match or could be solved by transforming this project.
-Respond ONLY with a valid JSON object:
-{{
-  "shortlisted_ids": ["ID1", "ID2"]
-}}"""
+Return shortlisted candidate IDs as JSON:
+{{"shortlisted_ids": ["ID1", "ID2"]}}"""
             try:
                 res = self.ai_provider.generate_json(prompt, system_prompt=system_prompt)
                 if isinstance(res, dict) and "shortlisted_ids" in res:
@@ -331,19 +366,35 @@ Respond ONLY with a valid JSON object:
                     return [str(x) for x in res["shortlisted_ids"] if str(x) in valid_ids]
             except Exception as e:
                 logger.warning(f"Groq triage batch failed: {e}")
+            finally:
+                telemetry["batch_durations_ms"].append(round((time.perf_counter() - batch_started) * 1000, 1))
             return []
 
         shortlisted_ids = set()
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_batch = {executor.submit(process_batch, b): b for b in batches}
-            for future in as_completed(future_to_batch):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            for b in batches:
+                futures.append(executor.submit(process_batch, b))
+                time.sleep(0.4)  # Pacing delay to prevent TPM bursts
+            for future in as_completed(futures):
                 try:
                     b_ids = future.result()
                     shortlisted_ids.update(b_ids)
                 except Exception as e:
                     logger.warning(f"Error gathering triage batch results: {e}")
 
-        logger.info(f"Full-corpus Groq triage shortlisted {len(shortlisted_ids)} candidates from {len(all_ps)} total problem statements.")
+        # If LLM rate-limited or yielded no items, supplement with heuristic triage
+        if not shortlisted_ids:
+            logger.info("LLM triage yielded 0 candidates (e.g. rate-limit / network); activating heuristic domain triage.")
+            shortlisted_ids.update(heuristic_ids)
+
+        logger.info(
+            "Groq triage shortlisted %s candidates from a %s-item local prefilter (corpus=%s).",
+            len(shortlisted_ids), len(triage_pool), len(all_ps)
+        )
+        telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        telemetry["shortlisted_candidates"] = len(shortlisted_ids)
+        self._last_triage_timing = telemetry
         return list(shortlisted_ids)
 
     def _retrieve_candidates(
@@ -401,7 +452,153 @@ Respond ONLY with a valid JSON object:
 
         return db.query(ProblemStatement).limit(35).all()
 
+    def batch_assess_intent_alignment(
+        self,
+        repo_profile: Dict[str, Any],
+        candidates: List[ProblemStatement]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Executes batched LLM intent alignment reasoning across candidate problem statements.
+        Evaluates real-world purpose fit with explicit veto instructions for disjoint domains.
+        """
+        stage_started = time.perf_counter()
+        telemetry: Dict[str, Any] = {
+            "backend": "heuristic" if not self.ai_provider or isinstance(self.ai_provider, HeuristicAIProvider) else type(self.ai_provider).__name__,
+            "candidates": len(candidates),
+            "batches": 0,
+            "batch_durations_ms": [],
+        }
+        results = {}
+        if not candidates:
+            telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            self._last_intent_timing = telemetry
+            return results
+
+        # 1. Separate candidates with clear heuristic match/veto vs ambiguous candidates requiring LLM
+        ambiguous_candidates = []
+        for ps in candidates:
+            h_res = self._heuristic_intent_assessment(
+                repo_profile, ps.id, ps.title, ps.theme, ps.description or "", ps.expected_solution or "", ps.background or ""
+            )
+            # If definitive heuristic match (>=88%) or definitive veto (domain_match=False with aim < 30%), record directly
+            if (not h_res.get("domain_match", True) and h_res.get("aim_alignment_score", 0) <= 30.0) or h_res.get("aim_alignment_score", 0) >= 88.0:
+                results[ps.id] = h_res
+            else:
+                ambiguous_candidates.append(ps)
+
+        if not ambiguous_candidates or not self.ai_provider or isinstance(self.ai_provider, HeuristicAIProvider):
+            for ps in ambiguous_candidates:
+                results[ps.id] = self._heuristic_intent_assessment(
+                    repo_profile, ps.id, ps.title, ps.theme, ps.description or "", ps.expected_solution or "", ps.background or ""
+                )
+            telemetry["heuristic_candidates"] = len(results)
+            telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+            self._last_intent_timing = telemetry
+            return results
+
+        repo_name = repo_profile.get("repo_name", "Repository")
+        repo_purpose = repo_profile.get("project_summary") or repo_profile.get("description") or "Software Project"
+        repo_domains = ", ".join(repo_profile.get("target_domains") or ["General Software"])
+        repo_caps = ", ".join([c["name"] for c in (repo_profile.get("capability_manifest") or {}).get("capabilities", [])[:4]])
+
+        batch_size = 8
+        batches = [ambiguous_candidates[i:i + batch_size] for i in range(0, len(ambiguous_candidates), batch_size)]
+        telemetry["batches"] = len(batches)
+        telemetry["heuristic_candidates"] = len(results)
+
+        system_prompt = (
+            "You are a strict, objective AI software architect evaluating hackathon problem-solution fit for Smart India Hackathon 2026. "
+            "CRITICAL PRINCIPLE: Two projects can share a programming language or an 'AI/ML' or 'Smart Automation' label while solving completely unrelated problems. "
+            "Judge on WHAT PROBLEM IS BEING SOLVED, not on tech stack or generic category tags. "
+            "If the repository purpose (e.g. Biomedical EEG / Healthcare) and the problem statement's ask (e.g. Retail Shopper Analytics, CPSE Material Codes, Agriculture) do not share the same real-world domain and goal, domain_match MUST be false and aim_alignment_score MUST be <= 25.0 regardless of any technical similarity."
+        )
+
+        def process_intent_batch(batch_ps: List[ProblemStatement]) -> Dict[str, Dict[str, Any]]:
+            batch_started = time.perf_counter()
+            items_payload = []
+            for ps in batch_ps:
+                summary = (ps.expected_solution or ps.description or "")[:200].strip().replace("\n", " ")
+                items_payload.append({
+                    "id": ps.id,
+                    "title": ps.title,
+                    "theme": ps.theme,
+                    "ministry": ps.organization,
+                    "ask_summary": summary
+                })
+
+            prompt = f"""REPOSITORY CONTEXT:
+- Repository Name: {repo_name}
+- Real-World Purpose / Stated Goal: {repo_purpose}
+- Target Domains: {repo_domains}
+- Core Capabilities: {repo_caps}
+
+CANDIDATE PROBLEM STATEMENTS:
+{json.dumps(items_payload, indent=2)}
+
+TASK:
+For each problem statement, evaluate whether this repository's actual real-world purpose solves what the ministry is asking for.
+Veto (domain_match=false, score<=25.0) any problem that belongs to a different industry/domain (e.g. Retail vs Healthcare, CPSE Material Codes vs EEG, etc.).
+
+Respond ONLY with valid JSON:
+{{
+  "assessments": [
+    {{
+      "id": "PS_ID",
+      "solves_same_core_problem": false,
+      "aim_alignment_score": 15.0,
+      "domain_match": false,
+      "reasoning": "Clear explanation of why it is or is not in the same real-world problem domain"
+    }}
+  ]
+}}"""
+            try:
+                res = self.ai_provider.generate_json(prompt, system_prompt=system_prompt)
+                if isinstance(res, dict) and "assessments" in res:
+                    batch_res = {}
+                    for item in res["assessments"]:
+                        pid = str(item.get("id"))
+                        batch_res[pid] = {
+                            "solves_same_core_problem": bool(item.get("solves_same_core_problem", False)),
+                            "aim_alignment_score": float(item.get("aim_alignment_score", 0.0)),
+                            "domain_match": bool(item.get("domain_match", False)),
+                            "reasoning": str(item.get("reasoning", ""))
+                        }
+                    return batch_res
+            except Exception as e:
+                logger.warning(f"Groq batch intent assessment failed: {e}")
+            finally:
+                telemetry["batch_durations_ms"].append(round((time.perf_counter() - batch_started) * 1000, 1))
+            
+            # Fallback for failed batch
+            batch_res = {}
+            for ps in batch_ps:
+                batch_res[ps.id] = self._heuristic_intent_assessment(
+                    repo_profile, ps.id, ps.title, ps.theme, ps.description or "", ps.expected_solution or "", ps.background or ""
+                )
+            return batch_res
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_batch = {executor.submit(process_intent_batch, b): b for b in batches}
+            for future in as_completed(future_to_batch):
+                try:
+                    b_res = future.result()
+                    results.update(b_res)
+                except Exception as e:
+                    logger.warning(f"Error gathering batch intent results: {e}")
+
+        # Ensure all candidates have an entry
+        for ps in candidates:
+            if ps.id not in results:
+                results[ps.id] = self._heuristic_intent_assessment(
+                    repo_profile, ps.id, ps.title, ps.theme, ps.description or "", ps.expected_solution or "", ps.background or ""
+                )
+
+        telemetry["elapsed_ms"] = round((time.perf_counter() - stage_started) * 1000, 1)
+        self._last_intent_timing = telemetry
+        return results
+
     def run(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        total_started = time.perf_counter()
         db: Session = context["db"]
         analysis_data = context.get("analysis_data", {})
         repo_info = context.get("repo_info", {})
@@ -443,33 +640,43 @@ Respond ONLY with a valid JSON object:
         }
 
         # Generate vector embedding
+        embedding_started = time.perf_counter()
         repo_vec = self.embedder.get_embedding(project_rep)
         embedding_fallback_active = self.embedder.is_fallback_active
+        embedding_elapsed_ms = round((time.perf_counter() - embedding_started) * 1000, 1)
 
         # Retrieve candidate problem statements from PostgreSQL via full-corpus Groq triage + vector union
+        retrieval_started = time.perf_counter()
         candidates = self._retrieve_candidates(db, repo_vec, analysis_data, repo_profile, manifest)
+        retrieval_elapsed_ms = round((time.perf_counter() - retrieval_started) * 1000, 1)
 
+        # Batch assess intent alignment across candidate pool using Groq LLM
+        intent_started = time.perf_counter()
+        intent_results_map = self.batch_assess_intent_alignment(repo_profile, candidates)
+        intent_elapsed_ms = round((time.perf_counter() - intent_started) * 1000, 1)
+
+        scoring_started = time.perf_counter()
         scored_matches = []
         vetoed_matches = []
 
         for ps in candidates:
-            # 1. Intent Alignment Step (Veto Guard)
-            intent_result = self.assess_intent_alignment(repo_profile, ps)
+            intent_result = intent_results_map.get(ps.id) or self.assess_intent_alignment(repo_profile, ps)
             domain_match = intent_result.get("domain_match", False)
             aim_score = float(intent_result.get("aim_alignment_score", 0.0))
+            solves_same = bool(intent_result.get("solves_same_core_problem", True))
 
-            if not domain_match or aim_score < 40.0:
+            # Hard Intent Gate: A candidate MUST genuinely align with the project's real-world aim.
+            # No amount of technical capability or category tags can compensate for a weak intent (< 55%).
+            if not domain_match or aim_score < 55.0 or not solves_same:
                 vetoed_matches.append({
                     "problem_statement_id": ps.id,
                     "title": ps.title,
                     "aim_alignment_score": aim_score,
-                    "reasoning": intent_result.get("reasoning", "Vetoed due to domain intent mismatch.")
+                    "reasoning": intent_result.get("reasoning", f"Vetoed due to domain intent mismatch ({aim_score:.1f}% aim score).")
                 })
-                continue
-
-            # 2. 6-Factor Multi-Dimensional Alignment Scoring against Capability Manifest
-            score_data = self._score_match(ps, analysis_data, repo_vec, intent_result, manifest, repo_info)
-            scored_matches.append(score_data)
+            else:
+                score_data = self._score_match(ps, analysis_data, repo_vec, intent_result, manifest, repo_info)
+                scored_matches.append(score_data)
 
         # Sort by overall match score descending
         scored_matches.sort(key=lambda x: x["overall_match_score"], reverse=True)
@@ -505,10 +712,24 @@ Respond ONLY with a valid JSON object:
         else:
             summary += "No candidates met the minimum intent threshold."
 
+        timing_breakdown_ms = {
+            "embedding_generation": embedding_elapsed_ms,
+            "candidate_retrieval": retrieval_elapsed_ms,
+            "groq_triage_batches": self._last_triage_timing,
+            "intent_gate_calls": self._last_intent_timing,
+            "intent_gate_total": intent_elapsed_ms,
+            "scoring": round((time.perf_counter() - scoring_started) * 1000, 1),
+            "total_matching": round((time.perf_counter() - total_started) * 1000, 1),
+        }
+        logger.info("[Matching Timing] %s", timing_breakdown_ms)
+
         return {
             "project_representation": project_rep,
             "repo_embedding": repo_vec,
             "embedding_fallback_active": embedding_fallback_active,
+            "embedding_backend": self.embedder.backend,
+            "embedding_provider_requested": self.embedder.provider,
+            "timing_breakdown_ms": timing_breakdown_ms,
             "top_matches": top_matches,
             "vetoed_matches": vetoed_matches,
             "domain_mismatch_warning": domain_mismatch_warning,
@@ -586,13 +807,53 @@ Respond ONLY with a valid JSON object:
         else:
             domain_score = 25.0
 
-        # 5. Tech Capability Alignment (10%)
-        tech_score = 80.0
-        if ps.category.lower() == "hardware":
-            if "Hardware / IoT / Embedded System" in analysis_data.get("project_type", ""):
-                tech_score = 90.0
+        # 5. Tech Capability Alignment (10%) - Continuous Architecture & Stack Compatibility
+        ps_full_text = (ps.title + " " + ps.description + " " + (ps.expected_solution or "")).lower()
+        repo_type = analysis_data.get("project_type", "")
+        repo_tech = [t.lower() for t in manifest.get("tech_stack", [])]
+        manifest_caps = [c["name"].lower() for c in manifest.get("capabilities", [])]
+        has_hardware_repo = "Hardware / IoT / Embedded System" in repo_type
+        
+        # Base tech score starting point
+        tech_score = 65.0
+        
+        # Check Hardware / Robotics / LiDAR / Drone mismatch
+        hardware_keywords = ["lidar", "radar", "sensor", "microcontroller", "drone", "uav", "fpga", "arduino", "embedded", "hardware", "iot", "point cloud", "sonar", "telemetry device", "camera hardware"]
+        hw_hits = sum(1 for kw in hardware_keywords if kw in ps_full_text)
+        is_ps_hardware = ps.category.lower() == "hardware" or hw_hits >= 2
+        
+        if is_ps_hardware:
+            if has_hardware_repo:
+                tech_score = 85.0 + min(12.0, hw_hits * 2.5)
             else:
-                tech_score = 35.0
+                # Severe architecture penalty for software repo attempting hardware/sensor perception
+                tech_score = max(15.0, 38.0 - (hw_hits * 5.0))
+        else:
+            # Software problem - evaluate software architectural alignment
+            # 1. 3D / WebGL / Graphics simulation mismatch
+            graphics_keywords = ["3d visualization", "webgl", "three.js", "simulation model", "ocean model", "mesh rendering", "unity", "unreal"]
+            g_hits = sum(1 for kw in graphics_keywords if kw in ps_full_text)
+            if g_hits >= 1 and not any("3d" in c or "graphics" in c or "visualization" in c for c in manifest_caps):
+                tech_score -= min(25.0, g_hits * 12.0)
+            
+            # 2. AI / ML model requirements
+            ml_keywords = ["machine learning", "deep learning", "neural network", "classification", "forecast", "prediction", "cnn", "xgboost", "nlp", "computer vision", "eeg", "biomedical"]
+            ml_hits = sum(1 for kw in ml_keywords if kw in ps_full_text)
+            repo_has_ml = any("model" in c or "ml" in c or "classifier" in c or "forecast" in c or "neural" in c or "signal" in c for c in manifest_caps) or any(t in ["pytorch", "tensorflow", "scikit-learn", "prophet", "xgboost"] for t in repo_tech)
+            if ml_hits >= 2:
+                if repo_has_ml:
+                    tech_score += min(18.0, ml_hits * 3.5)
+                else:
+                    tech_score -= 15.0
+            
+            # 3. Web backend & API services
+            api_keywords = ["rest api", "backend", "database", "portal", "dashboard", "fastapi", "postgresql", "management system", "platform"]
+            api_hits = sum(1 for kw in api_keywords if kw in ps_full_text)
+            repo_has_api = any("api" in c or "backend" in c or "data" in c for c in manifest_caps)
+            if api_hits >= 2 and repo_has_api:
+                tech_score += min(14.0, api_hits * 2.5)
+
+        tech_score = round(max(15.0, min(98.5, tech_score)), 1)
 
         # 6. Expected Solution Alignment (10%)
         sol_score = round((semantic_score * 0.5 + feature_score * 0.5), 1)
